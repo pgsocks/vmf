@@ -34,16 +34,21 @@ typedef struct vmf_schema_json_options {
 /* Always initialized when supplied. message is static NUL-terminated text,
  * independent of input/document lifetime; it never needs releasing.
  * byte_offset is a zero-based JSON byte offset for syntax errors, SIZE_MAX
- * when unavailable (never a PDU bit offset). schema_index is zero-based or
- * SIZE_MAX; node_id is zero when unavailable. Success clears both locations
- * to SIZE_MAX and node_id to zero, with status OK and message "ok".
+ * when unavailable (never a PDU bit offset). schema_index and index_position
+ * are zero-based array positions or SIZE_MAX when unavailable. property and
+ * related locations preserve core diagnostics without borrowing storage.
+ * Diagnostics remain valid after a failed load has released its storage.
+ * Success clears all locations, with status OK and message "ok".
  */
 typedef struct vmf_schema_json_error {
 	vmf_status status;
 	const char *message;
 	size_t byte_offset;
 	size_t schema_index;
-	vmf_node_id node_id;
+	size_t index_position;
+	vmf_schema_property property;
+	size_t related_index_position;
+	uint32_t related_scope_id;
 } vmf_schema_json_error;
 
 /* VMF defaults, 16 MiB input, 64 MiB live allocations, default allocator.
@@ -51,7 +56,7 @@ typedef struct vmf_schema_json_error {
  */
 vmf_schema_json_options vmf_schema_json_default_options(void);
 
-/* Read one complete strict UTF-8 JSON document, {"schemas":[...]}; see
+/* Read one complete strict UTF-8 vmf-schema/1 document; see
  * docs/schema-json.md for the complete format. data, options and result are
  * mandatory. data spans size readable bytes; no terminator/padding required.
  * An empty non-NULL buffer is TRUNCATED. Input is not modified or retained.

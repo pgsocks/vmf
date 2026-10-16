@@ -39,12 +39,26 @@ yyjson_mut_val *cli_header_to_json(yyjson_mut_doc *document,
 bool cli_header_from_json(yyjson_val *value, vmf_envelope_version profile,
 	cli_arena *arena, vmf_header *header);
 
+/* Canonical numeric references and exact resolved schema manifests. */
+yyjson_mut_val *cli_index_to_json(yyjson_mut_doc *document,
+	vmf_index_number number);
+bool cli_index_from_json(yyjson_val *value, cli_arena *arena,
+	vmf_index_number *number);
+yyjson_mut_val *cli_scope_to_json(yyjson_mut_doc *document,
+	vmf_scope_ref scope);
+bool cli_scope_from_json(yyjson_val *value,
+	const vmf_message_schema *message, vmf_scope_ref *scope);
+yyjson_mut_doc *cli_metadata_to_json(cli_json *context,
+	vmf_envelope_version profile, const vmf_schema_set *schemas);
+vmf_status cli_metadata_from_json(yyjson_val *value,
+	const vmf_schema_set *schemas, vmf_envelope_version *profile);
+
 /* Returned JSON owns copied event data. Caller frees the returned document. */
 yyjson_mut_doc *cli_event_to_json(cli_json *context,
 	const vmf_event *event, vmf_envelope_version profile, uint64_t time_ns);
 
 /* Decode one record. Schemas outlive its use; arena owns all other pointees.
- * active selects body nodes and is updated by a valid MESSAGE_BEGIN.
+ * active selects body indexes and is updated by a valid MESSAGE_BEGIN.
  * Errors do not publish an event. time_ns applies only to ENVELOPE.
  */
 vmf_status cli_event_from_json(yyjson_val *value,

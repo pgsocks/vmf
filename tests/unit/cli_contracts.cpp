@@ -10,21 +10,29 @@ namespace
 {
 
 struct cli_fixture {
-	vmf_node field = {};
-	vmf_node root = {};
+	uint32_t address[1] = {1};
+	vmf_index_refinements refinements = {};
+	vmf_scale_definition scale = {{1, 1}, {0, 1}, nullptr, 0};
+	vmf_index_schema field = {};
 	vmf_message_schema schema = {};
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set schemas = {&entry, 1};
+	vmf_schema_set schemas = {};
+	vmf_message_id id = {};
 	cli_arena arena = {};
 
 	cli_fixture()
 	{
-		fixtures::scalar(&field, 2, 64);
-		field.name = "value";
-		fixtures::group(&root, 1, &field, 1);
-		schema.root = &root;
-		schema.name = "test";
-		schema.id.user_message_format = 1;
+		field.index_number = {address, 1};
+		field.number_of_bits = 64;
+		field.refinements = &refinements;
+		schema.message_number = {1, 1};
+		schema.indexes = &field;
+		schema.index_count = 1;
+		schemas.envelope = VMF_ENVELOPE_D1;
+		schemas.messages = &schema;
+		schemas.message_count = 1;
+		schemas.standard.kind = VMF_STANDARD_RAW_CODE;
+		schemas.standard.as.raw_code = 0;
+		vmf_schema_message_id(&schemas, &schema, &id);
 	}
 
 	~cli_fixture()
@@ -94,12 +102,26 @@ vmf_status round_trip(cli_fixture *fixture, const vmf_event *source,
 
 vmf_event field_event(cli_fixture *fixture, vmf_field_kind kind)
 {
-	fixture->field.as.field.kind = kind;
+	const vmf_encode_type types[] = {VMF_ENCODE_BOOL, VMF_ENCODE_UNSIGNED,
+		VMF_ENCODE_SIGNED, VMF_ENCODE_ENUM, VMF_ENCODE_SCALED,
+		VMF_ENCODE_TEXT, VMF_ENCODE_OCTETS, VMF_ENCODE_BITS};
+
+	fixture->field.encode_type = types[kind];
+	fixture->field.number_of_bits = kind == VMF_FIELD_BOOL ? 1 : 64;
+	fixture->refinements = {};
+	if (kind == VMF_FIELD_SIGNED)
+		fixture->refinements.representation =
+			VMF_INTEGER_TWOS_COMPLEMENT;
+	if (kind == VMF_FIELD_SCALED)
+		fixture->refinements.scale = &fixture->scale;
+	if (kind == VMF_FIELD_TEXT)
+		fixture->refinements.text_encoding = VMF_TEXT_UTF_8;
 	vmf_event event = {};
 
 	event.kind = VMF_EVENT_FIELD;
 	event.schema = &fixture->schema;
-	event.node = &fixture->field;
+	event.index = &fixture->field;
+	event.field_kind = kind;
 	event.depth = 1;
 	event.occurrence = 1234567890123456;
 	event.as.field.total_units = 1;
@@ -121,7 +143,7 @@ TEST(CliJson, ScalarFieldsPreserveExactValuesAndDescriptorPointers)
 		if (kind == VMF_FIELD_SIGNED)
 			source.as.field.value.signed_integer.value = INT64_MIN;
 		ASSERT_EQ(VMF_OK, round_trip(&fixture, &source, &decoded));
-		EXPECT_EQ(&fixture.field, decoded.node);
+		EXPECT_EQ(&fixture.field, decoded.index);
 		EXPECT_EQ(&fixture.schema, decoded.schema);
 		EXPECT_EQ(1u, decoded.depth);
 		EXPECT_EQ(source.occurrence, decoded.occurrence);
@@ -191,21 +213,22 @@ TEST(CliJson, EveryBoundaryKindPreservesItsActiveMetadata)
 
 		source.kind = kind;
 		if (kind == VMF_EVENT_GROUP_BEGIN ||
-			kind == VMF_EVENT_GROUP_END || kind == VMF_EVENT_ABSENT) {
+			kind == VMF_EVENT_GROUP_END ||
+			kind == VMF_EVENT_ABSENT) {
 			source.schema = &fixture.schema;
-			source.node = &fixture.root;
+			source.scope = {VMF_SCOPE_ROOT, 0};
 			source.depth = 4;
 			source.occurrence = 19;
 			source.as.group = {VMF_UNITS_UNKNOWN, true, false};
 		} else if (kind != VMF_EVENT_PDU_END) {
 			source.schema = &fixture.schema;
-			source.as.message.id = fixture.schema.id;
+			source.as.message.id = fixture.id;
 			source.as.message.index = 12;
 			source.as.message.payload_octets = VMF_LENGTH_UNKNOWN;
 		}
 		ASSERT_EQ(VMF_OK, round_trip(&fixture, &source, &decoded));
 		EXPECT_EQ(kind, decoded.kind);
-		EXPECT_EQ(source.node, decoded.node);
+		EXPECT_EQ(source.index, decoded.index);
 		EXPECT_EQ(source.schema, decoded.schema);
 		EXPECT_EQ(source.depth, decoded.depth);
 		EXPECT_EQ(source.occurrence, decoded.occurrence);
@@ -236,7 +259,7 @@ TEST(CliJson, EnvelopePreservesEveryProfileAndOptionalHeaderData)
 		dtg, 8, 9};
 	uint16_t markings[] = {0, 511};
 
-	message.id = fixture.schema.id;
+	message.id = fixture.id;
 	message.id.standard_version = {true, 0};
 	message.id.identification_present = true;
 	message.id.functional_area = 7;
@@ -300,7 +323,8 @@ TEST(CliJson, EnvelopePreservesEveryProfileAndOptionalHeaderData)
 			vmf_header_layout(profile).size, 123,
 			VMF_LENGTH_UNKNOWN};
 		ASSERT_EQ(VMF_OK,
-			round_trip(&fixture, &source, &decoded, profile, &time));
+			round_trip(&fixture, &source, &decoded, profile,
+				&time));
 		EXPECT_EQ(1234567890123456u, time);
 		EXPECT_EQ(VMF_EVENT_ENVELOPE, decoded.kind);
 		EXPECT_EQ(profile, decoded.as.envelope.wire_version);
@@ -315,7 +339,8 @@ TEST(CliJson, EnvelopePreservesEveryProfileAndOptionalHeaderData)
 		EXPECT_TRUE(fields->compression.present);
 		EXPECT_EQ(0u, fields->compression.value);
 		EXPECT_TRUE(fields->originator.name.present);
-		EXPECT_EQ("name", std::string(fields->originator.name.value.data,
+		EXPECT_EQ("name", std::string(
+			fields->originator.name.value.data,
 			fields->originator.name.value.size));
 		EXPECT_EQ(1u, fields->information_addressee_count);
 		const auto *copy = &fields->messages[0];
@@ -470,7 +495,7 @@ TEST(CliJson, HeaderObjectsRequireCompleteUniqueKnownMembers)
 	header.d1.fields.originator = {true, {true, 1}, {}};
 	header.d1.fields.messages = &message;
 	header.d1.fields.message_count = 1;
-	message.id = fixture.schema.id;
+	message.id = fixture.id;
 	message.originator_dtg = {true, 26, 10, 15, 12, 34, 56, {}};
 	message.response.present = true;
 	message.response.receipt_compliance = 4;
@@ -521,13 +546,13 @@ TEST(CliJson, RejectsMalformedRecordsWithoutPublishingAnEvent)
 		"[]", "{}", "{\"event\":\"bad\"}",
 		"{\"event\":\"PDU_END\",\"event\":\"PDU_END\"}",
 		"{\"event\":\"PDU_END\",\"unexpected\":0}",
-		"{\"event\":\"FIELD\",\"node_id\":0,\"depth\":0,"
+		"{\"event\":\"FIELD\",\"index_number\":[],\"depth\":0,"
 		"\"occurrence\":\"0\"}",
-		"{\"event\":\"FIELD\",\"node_id\":2,\"depth\":0,"
+		"{\"event\":\"FIELD\",\"index_number\":[1],\"depth\":0,"
 		"\"occurrence\":0,\"offset_units\":\"0\","
 		"\"total_units\":\"1\",\"value\":{\"kind\":\"unsigned\","
 		"\"value\":\"1\"}}",
-		"{\"event\":\"FIELD\",\"node_id\":2,\"depth\":0,"
+		"{\"event\":\"FIELD\",\"index_number\":[1],\"depth\":0,"
 		"\"occurrence\":\"0\",\"offset_units\":\"0\","
 		"\"total_units\":\"1\",\"value\":{\"kind\":\"signed\","
 		"\"value\":\"1\"}}"
@@ -545,7 +570,7 @@ TEST(CliJson, RejectsMalformedRecordsWithoutPublishingAnEvent)
 	}
 }
 
-TEST(CliJson, UnknownIdentityAndNodeReturnExplicitStatuses)
+TEST(CliJson, UnknownIdentityAndIndexReturnExplicitStatuses)
 {
 	cli_fixture fixture;
 	vmf_event event = {};
@@ -557,7 +582,7 @@ TEST(CliJson, UnknownIdentityAndNodeReturnExplicitStatuses)
 		"\"payload_octets\":null}", &event, nullptr, &selected));
 	EXPECT_EQ(&fixture.schema, selected);
 	EXPECT_EQ(VMF_INVALID_SCHEMA, parse(&fixture,
-		"{\"event\":\"ABSENT\",\"node_id\":999,\"depth\":0,"
+		"{\"event\":\"ABSENT\",\"index_number\":[999],\"depth\":0,"
 		"\"occurrence\":\"0\"}", &event));
 }
 
@@ -600,11 +625,11 @@ TEST(CliJson, PrimitiveDecimalsRejectNoncanonicalAndOverflowValues)
 	}
 }
 
-TEST(CliJson, RejectsMalformedNestedValuesAndAllowsReadableAnnotations)
+TEST(CliJson, RejectsMalformedNestedValuesAndDecorativeAnnotations)
 {
 	cli_fixture fixture;
 	vmf_event event = {};
-	const std::string field = "{\"event\":\"FIELD\",\"node_id\":2,"
+	const std::string field = "{\"event\":\"FIELD\",\"index_number\":[1],"
 		"\"depth\":1,\"occurrence\":\"0\",\"offset_units\":\"0\","
 		"\"total_units\":\"1\",\"value\":";
 	const char *invalid[] = {
@@ -622,9 +647,8 @@ TEST(CliJson, RejectsMalformedNestedValuesAndAllowsReadableAnnotations)
 	std::string line = field + "{\"kind\":\"unsigned\",\"value\":\"1\"},"
 		"\"name\":\"edited name\",\"schema_name\":\"annotation\"}";
 
-	EXPECT_EQ(VMF_OK, parse(&fixture, line.c_str(), &event));
-	EXPECT_EQ(&fixture.field, event.node);
-	fixture.field.as.field.kind = VMF_FIELD_BITS;
+	EXPECT_EQ(VMF_MALFORMED, parse(&fixture, line.c_str(), &event));
+	fixture.field.encode_type = VMF_ENCODE_BITS;
 	const char *bits[] = {
 		"{\"kind\":\"bits\",\"hex\":\"ff\",\"bit_count\":\"1\","
 		"\"last\":true}",
@@ -640,6 +664,79 @@ TEST(CliJson, RejectsMalformedNestedValuesAndAllowsReadableAnnotations)
 		line = field + value + "}";
 		EXPECT_NE(VMF_OK, parse(&fixture, line.c_str(), &event));
 	}
+}
+
+TEST(CliJson, ArchiveManifestsResolveDefaultsAndRejectChangedDefinitions)
+{
+	cli_fixture fixture;
+	cli_json context;
+
+	cli_json_init(&context);
+	yyjson_mut_doc *metadata = cli_metadata_to_json(&context,
+		VMF_ENVELOPE_D1, &fixture.schemas);
+
+	ASSERT_NE(nullptr, metadata);
+	yyjson_doc *input = yyjson_mut_doc_imut_copy(metadata, nullptr);
+
+	ASSERT_NE(nullptr, input);
+	vmf_envelope_version profile = VMF_ENVELOPE_B;
+
+	EXPECT_EQ(VMF_OK, cli_metadata_from_json(yyjson_doc_get_root(input),
+		&fixture.schemas, &profile));
+	EXPECT_EQ(VMF_ENVELOPE_D1, profile);
+	fixture.field.encode_type = VMF_ENCODE_UNSIGNED;
+	fixture.refinements.bit_order = VMF_BIT_LSB_FIRST;
+	fixture.refinements.representation = VMF_INTEGER_UNSIGNED;
+	fixture.schema.octet_order = VMF_BIT_LSB_FIRST;
+	EXPECT_EQ(VMF_OK, cli_metadata_from_json(yyjson_doc_get_root(input),
+		&fixture.schemas, &profile));
+	fixture.field.number_of_bits = 63;
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		cli_metadata_from_json(yyjson_doc_get_root(input),
+			&fixture.schemas, &profile));
+	yyjson_doc_free(input);
+	yyjson_mut_doc_free(metadata);
+	EXPECT_EQ(0u, context.used);
+}
+
+TEST(CliJson, ArchiveRejectsUnsupportedVersionsAndAcceptsUnrelatedMessages)
+{
+	cli_fixture fixture;
+	cli_json context;
+
+	cli_json_init(&context);
+	const char unsupported[] =
+		"{\"format\":\"vmf-events\",\"version\":99,"
+		"\"profile\":\"D1\",\"schemas\":[]}";
+	yyjson_doc *input = cli_json_read(
+		&context, unsupported, sizeof(unsupported) - 1);
+	vmf_envelope_version profile = VMF_ENVELOPE_B;
+
+	ASSERT_NE(nullptr, input);
+	EXPECT_EQ(VMF_MALFORMED,
+		cli_metadata_from_json(yyjson_doc_get_root(input),
+			&fixture.schemas, &profile));
+	yyjson_doc_free(input);
+	yyjson_mut_doc *metadata = cli_metadata_to_json(&context,
+		VMF_ENVELOPE_D1, &fixture.schemas);
+
+	ASSERT_NE(nullptr, metadata);
+	input = yyjson_mut_doc_imut_copy(metadata, nullptr);
+	ASSERT_NE(nullptr, input);
+	vmf_message_schema messages[] = {fixture.schema, fixture.schema};
+	vmf_schema_set schemas = fixture.schemas;
+
+	messages[1].message_number.number = 2;
+	schemas.messages = messages;
+	schemas.message_count = 2;
+	EXPECT_EQ(VMF_OK, cli_metadata_from_json(yyjson_doc_get_root(input),
+		&schemas, &profile));
+	schemas.envelope = VMF_ENVELOPE_C;
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		cli_metadata_from_json(yyjson_doc_get_root(input),
+			&schemas, &profile));
+	yyjson_doc_free(input);
+	yyjson_mut_doc_free(metadata);
 }
 
 struct test_clock {
@@ -690,33 +787,76 @@ TEST(CliJson, DecodedPduSurvivesJsonAndCoreEncoder)
 {
 	cli_fixture fixture;
 
-	fixture.field.as.field.as.scalar.encoding.bit_width = 8;
-	auto options = fixtures::options(VMF_ENVELOPE_D1, &fixture.schemas);
+	fixture.field.number_of_bits = 8;
+	auto options = vmf_options_for_schemas(&fixture.schemas);
 	vmf_decoder *reader = nullptr;
 	vmf_encoder *writer = nullptr;
+	vmf_encoder *source = nullptr;
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
 	ASSERT_EQ(VMF_OK, vmf_encoder_create(&options, false,
 		&writer, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_encoder_create(&options, false,
+		&source, nullptr));
+	vmf_message_header message = {};
+	vmf_header_d1 header = {};
+
+	message.id = fixture.id;
+	message.has_body = true;
+	message.message_size_octets = {true, 1};
+	header.fields.messages = &message;
+	header.fields.message_count = 1;
+	std::vector<uint8_t> original;
+	vmf_event event = {};
+
+	event.kind = VMF_EVENT_ENVELOPE;
+	event.as.envelope = {4, &header, sizeof(header),
+		VMF_LENGTH_UNKNOWN, VMF_LENGTH_UNKNOWN};
+	fixtures::write(source, &event, &original);
+	event = {};
+	event.kind = VMF_EVENT_MESSAGE_BEGIN;
+	event.as.message = {fixture.id, 0, 1};
+	fixtures::write(source, &event, &original);
+	event = {};
+	event.kind = VMF_EVENT_GROUP_BEGIN;
+	event.scope = {VMF_SCOPE_ROOT, 0};
+	event.as.group.count = 1;
+	fixtures::write(source, &event, &original);
+	event = field_event(&fixture, VMF_FIELD_UNSIGNED);
+	fixture.field.number_of_bits = 8;
+	event.occurrence = 0;
+	event.as.field.value.unsigned_integer.value = 90;
+	fixtures::write(source, &event, &original);
+	event = {};
+	event.kind = VMF_EVENT_GROUP_END;
+	event.scope = {VMF_SCOPE_ROOT, 0};
+	event.as.group.count = 1;
+	fixtures::write(source, &event, &original);
+	event = {};
+	event.kind = VMF_EVENT_MESSAGE_END;
+	event.as.message = {fixture.id, 0, 1};
+	fixtures::write(source, &event, &original);
+	event = {};
+	event.kind = VMF_EVENT_PDU_END;
+	fixtures::write(source, &event, &original);
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-	vmf_input input = {fixtures::binary_d1, sizeof(fixtures::binary_d1),
-		0, true};
+	vmf_input input = {original.data(), original.size(), 0, true};
 	std::vector<uint8_t> encoded;
 
 	for (size_t attempts = 0; attempts < 100; ++attempts) {
-		vmf_event event = {};
-		vmf_status status = vmf_decoder_next(reader, &input, &event);
+		vmf_event decoded = {};
+		vmf_status status = vmf_decoder_next(reader, &input, &decoded);
 
 		if (status == VMF_DONE)
 			break;
 		ASSERT_EQ(VMF_OK, status);
 		vmf_event replayed = {};
 
-		ASSERT_EQ(VMF_OK, round_trip(&fixture, &event, &replayed));
+		ASSERT_EQ(VMF_OK, round_trip(&fixture, &decoded, &replayed));
 		fixtures::write(writer, &replayed, &encoded);
 	}
-	EXPECT_EQ(std::vector<uint8_t>(fixtures::binary_d1,
-		fixtures::binary_d1 + sizeof(fixtures::binary_d1)), encoded);
+	EXPECT_EQ(original, encoded);
+	vmf_encoder_destroy(source);
 	vmf_encoder_destroy(writer);
 	vmf_decoder_destroy(reader);
 }

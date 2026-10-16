@@ -35,22 +35,25 @@ vmf_status vmf_decoder_dispatch(vmf_decoder *decoder, vmf_input *input,
 				event.kind == VMF_EVENT_MESSAGE_END
 					? event.as.message.index
 					: decoder->descriptor;
-		decoder->error.node_id = event.node ? event.node->id : 0;
+		decoder->error.schema_index =
+			event.schema && decoder->config.schemas
+			? static_cast<size_t>(event.schema -
+				decoder->config.schemas->messages) : SIZE_MAX;
+		decoder->error.related_scope_id = event.scope.id;
+		decoder->error.index_position = event.index
+			? static_cast<size_t>(event.index -
+				event.schema->indexes)
+			: SIZE_MAX;
 		decoder->phase = DECODER_FAILED;
 		return decoder->error.status;
 	}
 }
 
 vmf_status vmf_encoder_write_field(vmf_encoder *encoder, vmf_output *output,
-	const vmf_node *node, const void *value, size_t value_size,
+	const vmf_index_schema *index, const void *value, size_t value_size,
 	uint64_t total_units)
 {
-	if (!encoder || !node || !value || node->kind != VMF_NODE_FIELD)
-		return VMF_INVALID_ARGUMENT;
-	vmf_layout layout = vmf_field_layout(node->as.field.kind);
-
-	if (value_size != layout.size || !layout.size ||
-		reinterpret_cast<uintptr_t>(value) % layout.alignment)
+	if (!encoder || !index || !value)
 		return VMF_INVALID_ARGUMENT;
 	if (encoder->event_pending && !encoder->field_pending)
 		return VMF_INVALID_STATE;
@@ -59,7 +62,17 @@ vmf_status vmf_encoder_write_field(vmf_encoder *encoder, vmf_output *output,
 	vmf_event event = {};
 
 	event.kind = VMF_EVENT_FIELD;
-	event.node = node;
+	event.index = index;
+	const vmf_node *node = payload_event_node(encoder->payload, &event);
+
+	if (!node || node->kind != VMF_NODE_FIELD)
+		return VMF_INVALID_ARGUMENT;
+	event.field_kind = node->as.field.kind;
+	vmf_layout layout = vmf_field_layout(event.field_kind);
+
+	if (value_size != layout.size || !layout.size ||
+		reinterpret_cast<uintptr_t>(value) % layout.alignment)
+		return VMF_INVALID_ARGUMENT;
 	vmf_status status;
 
 	if (encoder->field_pending) {
@@ -89,9 +102,9 @@ vmf_status vmf_event_copy_field(
 	const vmf_event *event, void *value, size_t value_size)
 {
 	if (!event || !value || event->kind != VMF_EVENT_FIELD ||
-		!event->node || event->node->kind != VMF_NODE_FIELD)
+		!event->index || event->index->indicator != VMF_INDICATOR_NONE)
 		return VMF_INVALID_ARGUMENT;
-	vmf_layout layout = vmf_field_layout(event->node->as.field.kind);
+	vmf_layout layout = vmf_field_layout(event->field_kind);
 
 	if (!layout.size || value_size != layout.size ||
 		reinterpret_cast<uintptr_t>(value) % layout.alignment)

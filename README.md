@@ -8,7 +8,7 @@ sources and the limits of the available evidence.
 
 A message contains an envelope and a payload whose fields depend on a schema
 agreed by sender and receiver. This library provides C11 and procedural C++17
-interfaces, logical header structures, caller-authored payload schema trees,
+interfaces, logical header structures, ordered VMF message/index definitions,
 and incremental event-based encoding and decoding. MIL-STD-6017 message
 definitions are not included. Public examples and synthetic schemas exercise
 the codec without claiming compatibility with any fielded message set.
@@ -52,7 +52,10 @@ tested scope and source revision.
 
 Test dependencies are excluded from installation. The static target is
 `vmf::vmf`. The default build also provides `vmf::schema_json`, which loads
-JSON payload definitions into ordinary VMF schemas using pinned yyjson 0.12.0.
+`vmf-schema/1` JSON definitions into that same native model using pinned
+yyjson 0.12.0. The core resolves profiles, defaults, scopes and controls for
+both native and JSON callers; JSON is optional. Payload definitions support
+VMF (UMF 2), while envelope inspection supports all documented formats.
 Use the `core-only` preset to omit this companion and its JSON dependency.
 Installation rules are not yet provided. The shared installation prefix is
 `$HOME/.local`.

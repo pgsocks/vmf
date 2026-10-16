@@ -8,6 +8,65 @@
 
 extern "C" int vmf_schema_json_c_consumer(void);
 
+namespace
+{
+
+static const char empty_definition[] =
+	"{\"format\":\"vmf-schema/1\",\"envelope\":\"C\",\"messages\":[]}";
+
+struct json_owner {
+	vmf_schema_json_document *document = nullptr;
+
+	~json_owner()
+	{
+		vmf_schema_json_destroy(document);
+	}
+};
+
+static std::string field(unsigned index, unsigned width)
+{
+	return "{\"index_number\":\"" + std::to_string(index) +
+	       ".\",\"number_of_bits\":" + std::to_string(width) + "}";
+}
+
+static std::string member(unsigned index, const std::string &properties)
+{
+	std::string result = field(index, 1);
+
+	result.pop_back();
+	return result + properties + "}";
+}
+
+static std::string message(const std::string &indexes,
+	const std::string &extra = "")
+{
+	return "{\"message_number\":\"K01.1\",\"indexes\":[" + indexes +
+	       "]" + extra + "}";
+}
+
+static std::string registry(const std::string &messages,
+	const std::string &extra = "")
+{
+	return "{\"format\":\"vmf-schema/1\",\"envelope\":\"C\","
+	       "\"messages\":[" + messages + "]" + extra + "}";
+}
+
+static std::string definition(const std::string &indexes)
+{
+	return registry(message(indexes));
+}
+
+static vmf_status load(const std::string &input, json_owner *owner,
+	vmf_schema_json_error *error = nullptr,
+	const vmf_schema_json_options *configuration = nullptr)
+{
+	auto options = vmf_schema_json_default_options();
+
+	return vmf_schema_json_load(input.data(), input.size(),
+		configuration ? configuration : &options,
+		&owner->document, error);
+}
+
 TEST(SchemaJson, CAndProceduralCppConsumersLink)
 {
 	EXPECT_EQ(1, vmf_schema_json_c_consumer());
@@ -21,114 +80,21 @@ TEST(SchemaJson, CAndProceduralCppConsumersLink)
 
 TEST(SchemaJson, EmptySetLoadsAndClearsDiagnostics)
 {
-	const char input[] = "{\"schemas\":[]}";
-	auto options = vmf_schema_json_default_options();
-	vmf_schema_json_document *document = nullptr;
+	json_owner owner;
 	vmf_schema_json_error error = {};
 
-	ASSERT_EQ(VMF_OK, vmf_schema_json_load(input, sizeof(input) - 1,
-		&options, &document, &error));
-	ASSERT_NE(nullptr, document);
-	const vmf_schema_set *set = vmf_schema_json_schemas(document);
-
-	ASSERT_NE(nullptr, set);
-	EXPECT_EQ(0u, set->count);
+	ASSERT_EQ(VMF_OK, load(empty_definition, &owner, &error));
+	ASSERT_NE(nullptr, vmf_schema_json_schemas(owner.document));
 	EXPECT_EQ(VMF_OK, error.status);
 	EXPECT_STREQ("ok", error.message);
 	EXPECT_EQ(SIZE_MAX, error.byte_offset);
 	EXPECT_EQ(SIZE_MAX, error.schema_index);
-	EXPECT_EQ(0u, error.node_id);
-	vmf_schema_json_destroy(document);
-}
-
-namespace
-{
-
-struct json_owner {
-	vmf_schema_json_document *document = nullptr;
-
-	~json_owner()
-	{
-		vmf_schema_json_destroy(document);
-	}
-};
-
-static std::string group(unsigned id, const std::string &children)
-{
-	return "{\"id\":" + std::to_string(id) +
-	       ",\"kind\":\"group\",\"group\":{\"children\":[" +
-	       children + "]}}";
-}
-
-static std::string encoding(unsigned width,
-	const std::string &representation = "unsigned",
-	const std::string &order = "lsb_first")
-{
-	return "{\"bit_width\":" + std::to_string(width) +
-	       ",\"order\":\"" + order + "\",\"representation\":\"" +
-	       representation + "\"}";
-}
-
-static std::string scalar(unsigned id, const std::string &kind = "unsigned",
-	unsigned width = 8, const std::string &representation = "unsigned",
-	const std::string &metadata = "")
-{
-	return "{\"id\":" + std::to_string(id) +
-	       ",\"kind\":\"field\",\"field\":{\"kind\":\"" + kind +
-	       "\",\"scalar\":{\"encoding\":" +
-	       encoding(width, representation) + metadata + "}}}";
-}
-
-static std::string schema(const std::string &root,
-	const std::string &identity = "{\"user_message_format\":1}",
-	const std::string &extra = "")
-{
-	return "{\"id\":" + identity +
-	       ",\"octet_order\":\"lsb_first\",\"root\":" + root + extra + "}";
-}
-
-static std::string set(const std::string &schemas)
-{
-	return "{\"schemas\":[" + schemas + "]}";
-}
-
-static std::string extent(const std::string &kind,
-	const std::string &active, unsigned minimum = 0,
-	const std::string &maximum = "8")
-{
-	return "{\"kind\":\"" + kind + "\",\"minimum\":" +
-	       std::to_string(minimum) + ",\"maximum\":" +
-	       maximum + active + "}";
-}
-
-static std::string field(unsigned id, const std::string &kind,
-	const std::string &definition)
-{
-	return "{\"id\":" + std::to_string(id) +
-	       ",\"kind\":\"field\",\"field\":{\"kind\":\"" + kind + "\",\"" +
-	       kind + "\":" + definition + "}}";
-}
-
-static vmf_status load(const std::string &input, json_owner *owner,
-	vmf_schema_json_error *error = nullptr,
-	const vmf_schema_json_options *configured = nullptr)
-{
-	auto defaults = vmf_schema_json_default_options();
-
-	return vmf_schema_json_load(input.data(), input.size(),
-		configured ? configured : &defaults, &owner->document, error);
-}
-
-static const vmf_message_schema *first(const json_owner &owner)
-{
-	const vmf_schema_set *schemas = vmf_schema_json_schemas(owner.document);
-
-	return schemas && schemas->count ? schemas->schemas[0] : nullptr;
+	EXPECT_EQ(SIZE_MAX, error.index_position);
+	EXPECT_EQ(VMF_PROPERTY_NONE, error.property);
 }
 
 TEST(SchemaJson, ApiMisuseInitializesOutputs)
 {
-	const char input[] = "{\"schemas\":[]}";
 	auto options = vmf_schema_json_default_options();
 	vmf_schema_json_document *owner = nullptr;
 	vmf_schema_json_error error = {};
@@ -137,36 +103,27 @@ TEST(SchemaJson, ApiMisuseInitializesOutputs)
 		&options, &owner, &error));
 	EXPECT_EQ(nullptr, owner);
 	EXPECT_EQ(VMF_INVALID_ARGUMENT, error.status);
-	EXPECT_EQ(SIZE_MAX, error.byte_offset);
 	EXPECT_EQ(SIZE_MAX, error.schema_index);
-	EXPECT_EQ(0u, error.node_id);
-	EXPECT_NE(nullptr, error.message);
-	EXPECT_EQ(VMF_INVALID_ARGUMENT, vmf_schema_json_load(input,
-		sizeof(input) - 1, nullptr, &owner, &error));
-	EXPECT_EQ(nullptr, owner);
-	EXPECT_EQ(VMF_INVALID_ARGUMENT, vmf_schema_json_load(input,
-		sizeof(input) - 1, &options, nullptr, &error));
-	EXPECT_EQ(VMF_INVALID_ARGUMENT, error.status);
+	EXPECT_EQ(SIZE_MAX, error.index_position);
+	EXPECT_EQ(VMF_INVALID_ARGUMENT, vmf_schema_json_load(empty_definition,
+		sizeof(empty_definition) - 1, nullptr, &owner, &error));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT, vmf_schema_json_load(empty_definition,
+		sizeof(empty_definition) - 1, &options, nullptr, &error));
 }
 
 TEST(SchemaJson, SyntaxFailuresHaveByteLocations)
 {
-	const char *truncated[] = {
-		"", "{", "{\"schemas\":[", "{\"schemas\":[]"};
-
-	for (const char *input : truncated) {
+	for (const std::string input : {"", " ", "{", "{\"format\":"}) {
 		SCOPED_TRACE(input);
 		json_owner owner;
 		vmf_schema_json_error error = {};
 
 		EXPECT_EQ(VMF_TRUNCATED, load(input, &owner, &error));
 		EXPECT_EQ(nullptr, owner.document);
-		EXPECT_LE(error.byte_offset, std::strlen(input));
-		EXPECT_EQ(SIZE_MAX, error.schema_index);
+		EXPECT_NE(SIZE_MAX, error.byte_offset);
 	}
-	const char *malformed[] = {"{\"schemas\":[],}", "{\"schemas\":[]}x",
-		"{\"schemas\":[NaN]}", "{/*comment*/\"schemas\":[]}",
-		"{\"schemas\":[],\"x\":\"\\ud800\"}"};
+	const char *malformed[] = {"{}{}", "{,}", "{/*x*/}",
+		"{\"format\":\"vmf-schema/1\",}", "[NaN]", "[Infinity]"};
 
 	for (const char *input : malformed) {
 		SCOPED_TRACE(input);
@@ -175,450 +132,115 @@ TEST(SchemaJson, SyntaxFailuresHaveByteLocations)
 
 		EXPECT_EQ(VMF_MALFORMED, load(input, &owner, &error));
 		EXPECT_EQ(nullptr, owner.document);
-		EXPECT_LT(error.byte_offset, std::strlen(input));
+		EXPECT_NE(SIZE_MAX, error.byte_offset);
 	}
-	std::string invalid = "{\"schemas\":[],\"x\":\"";
+	std::string invalid_utf8 = "{\"format\":\"";
 
-	invalid += static_cast<char>(0xff);
-	invalid += "\"}";
+	invalid_utf8.push_back(static_cast<char>(0xff));
+	invalid_utf8 += "\"}";
 	json_owner owner;
 
-	EXPECT_EQ(VMF_MALFORMED, load(invalid, &owner));
+	EXPECT_EQ(VMF_MALFORMED, load(invalid_utf8, &owner));
 }
 
-TEST(SchemaJson, RejectsUnknownDuplicateNullAndWrongTypedProperties)
+TEST(SchemaJson, RejectsUnrecognizedFormatsExplicitly)
 {
-	const char *invalid[] = {"[]", "{}", "{\"schemas\":null}",
-		"{\"schemas\":{},\"extra\":0}", "{\"schemas\":[],\"extra\":0}",
-		"{\"schemas\":[],\"schemas\":[]}"};
+	const char *inputs[] = {"{\"schemas\":[]}",
+		"{\"format\":\"vmf-schema/99\",\"schemas\":[]}",
+		"{\"format\":\"unknown\",\"envelope\":\"C\",\"messages\":[]}"};
 
-	for (const char *input : invalid) {
+	for (const char *input : inputs) {
 		SCOPED_TRACE(input);
 		json_owner owner;
 		vmf_schema_json_error error = {};
 
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(input, &owner, &error));
+		EXPECT_EQ(VMF_UNSUPPORTED_SCHEMA_FEATURE,
+			load(input, &owner, &error));
 		EXPECT_EQ(nullptr, owner.document);
-		EXPECT_EQ(SIZE_MAX, error.byte_offset);
+		EXPECT_STREQ("unsupported schema format", error.message);
 	}
-	const char *roots[] = {
-		"{\"id\":1,\"kind\":\"group\",\"group\":{\"children\":[]},"
-		"\"field\":{}}",
-		"{\"id\":1,\"id\":2,\"kind\":\"group\","
-		"\"group\":{\"children\":[]}}",
-		"{\"id\":1,\"kind\":\"group\","
-		"\"group\":{\"children\":[],\"x\":0}}",
-		"{\"id\":1,\"kind\":\"group\",\"group\":{\"children\":[]},"
-		"\"presence\":null}",
-		"{\"id\":1,\"kind\":\"GROUP\",\"group\":{\"children\":[]}}"};
+}
 
-	for (const char *root : roots) {
-		SCOPED_TRACE(root);
+TEST(SchemaJson, RejectsUnknownDuplicateNullAndWrongTypedProperties)
+{
+	const std::string inputs[] = {
+		"[]", "null", "{}", registry("", ",\"name\":\"display\""),
+		registry("", ",\"messages\":[]"),
+		registry("", ",\"envel\\u006fpe\":\"C\""),
+		"{\"format\":\"old\",\"format\":\"vmf-schema/1\","
+			"\"envelope\":\"C\",\"messages\":[]}",
+		definition("null"), definition("{}"),
+		definition("{\"index_number\":null,\"number_of_bits\":8}"),
+		definition("{\"index_number\":\"1.\",\"number_of_bits\":null}"),
+		definition("{\"index_number\":\"1.\",\"number_of_bits\":8,"
+			"\"number_of_bits\":8}"),
+		definition("{\"index_number\":\"1.\",\"number_of_bits\":8,"
+			"\"name\":\"display\"}"),
+		definition("{\"index_number\":\"1.\",\"number_of_bits\":8,"
+			"\"encode_type\":\"unknown\"}"),
+		registry(message("", ",\"title\":\"display\"")),
+		registry(message("", ",\"subtype\":null"))};
+
+	for (const auto &input : inputs) {
+		SCOPED_TRACE(input);
 		json_owner owner;
 
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(root)), &owner));
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(input, &owner));
+		EXPECT_EQ(nullptr, owner.document);
 	}
 }
 
-TEST(SchemaJson, OptionalIdentitiesDistinguishOmissionAndPresentZero)
+TEST(SchemaJson, RejectsInvalidNumericTokensAndNotation)
 {
-	json_owner owner;
-	std::string absent = schema(group(1, ""));
-	std::string present = schema(group(1, ""),
-		"{\"user_message_format\":1,\"standard_version\":0}");
-	std::string identified = schema(group(1, ""),
-		"{\"user_message_format\":1,\"standard_version\":0,"
-		"\"identification\":{\"functional_area\":0,"
-		"\"message_number\":1,"
-		"\"subtype\":0}}");
+	const char *numbers[] = {"-1", "1.0", "1e0", "\"8\"", "true",
+		"18446744073709551616"};
 
-	ASSERT_EQ(VMF_OK, load(set(absent + "," + present + "," + identified),
-		&owner));
-	const vmf_schema_set *schemas = vmf_schema_json_schemas(owner.document);
-
-	ASSERT_EQ(3u, schemas->count);
-	EXPECT_FALSE(schemas->schemas[0]->id.standard_version.present);
-	EXPECT_TRUE(schemas->schemas[1]->id.standard_version.present);
-	EXPECT_EQ(0u, schemas->schemas[1]->id.standard_version.value);
-	EXPECT_FALSE(schemas->schemas[1]->id.identification_present);
-	EXPECT_TRUE(schemas->schemas[2]->id.identification_present);
-	EXPECT_TRUE(schemas->schemas[2]->id.subtype.present);
-	EXPECT_EQ(0u, schemas->schemas[2]->id.subtype.value);
-	EXPECT_FALSE(vmf_message_id_equal(&schemas->schemas[0]->id,
-		&schemas->schemas[1]->id));
-}
-
-TEST(SchemaJson, LoadsEveryScalarKindAndIntegerRepresentation)
-{
-	const char *kinds[] = {"bool", "unsigned", "signed", "enum", "scaled"};
-	const vmf_field_kind expected[] = {VMF_FIELD_BOOL, VMF_FIELD_UNSIGNED,
-		VMF_FIELD_SIGNED, VMF_FIELD_ENUM, VMF_FIELD_SCALED};
-	std::string children;
-
-	for (unsigned i = 0; i < 5; ++i) {
-		if (i)
-			children += ",";
-		children += scalar(i + 2, kinds[i], i ? 8 : 1,
-			i == 2 ? "twos_complement" : "unsigned",
-			i == 4 ? ",\"scale\":{\"factor\":{\"numerator\":1,"
-				 "\"denominator\":2},\"bias\":{"
-				 "\"numerator\":-1,\"denominator\":3}}" : "");
-	}
-	json_owner owner;
-
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1, children))), &owner));
-	const vmf_node *root = first(owner)->root;
-
-	ASSERT_EQ(5u, root->as.group.child_count);
-	for (unsigned i = 0; i < 5; ++i) {
-		const vmf_node *node = &root->as.group.children[i];
-
-		EXPECT_EQ(i + 2, node->id);
-		EXPECT_EQ(expected[i], node->as.field.kind);
-		EXPECT_EQ(VMF_PRESENCE_ALWAYS, node->presence.kind);
-		EXPECT_EQ(0u, node->as.field.as.scalar.allowed_count);
-		EXPECT_EQ(0u, node->as.field.as.scalar.label_count);
-	}
-	EXPECT_EQ(1, root->as.group.children[4].as.field.as.scalar
-		.scale.factor.numerator);
-	EXPECT_EQ(3u, root->as.group.children[4].as.field.as.scalar
-		.scale.bias.denominator);
-	const char *representations[] = {
-		"twos_complement", "ones_complement", "sign_magnitude"};
-
-	for (unsigned i = 0; i < 3; ++i) {
-		json_owner signed_owner;
-
-		ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-			scalar(2, "signed", 64, representations[i])))),
-			&signed_owner));
-		EXPECT_EQ(static_cast<vmf_integer_representation>(i + 1),
-			first(signed_owner)->root->as.group.children[0]
-				.as.field.as.scalar.encoding.representation);
-	}
-}
-
-TEST(SchemaJson, PreservesExactIntegerBoundariesAndLengthDelimitedLabels)
-{
-	std::string metadata = ",\"allowed\":[{\"first\":0,"
-		"\"last\":18446744073709551615}],\"labels\":[{"
-		"\"code\":18446744073709551615,\"name\":\"A\\u0000B\"}],"
-		"\"scale\":{\"factor\":{\"numerator\":-9223372036854775808,"
-		"\"denominator\":18446744073709551615},\"bias\":{"
-		"\"numerator\":9223372036854775807,\"denominator\":1},"
-		"\"sentinels\":[{\"code\":18446744073709551615,"
-		"\"name\":\"max\"}]}";
-	json_owner owner;
-
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-		scalar(2, "scaled", 64, "unsigned", metadata)))), &owner));
-	const vmf_scalar_definition *value =
-		&first(owner)->root->as.group.children[0].as.field.as.scalar;
-
-	ASSERT_EQ(1u, value->allowed_count);
-	EXPECT_EQ(UINT64_MAX, value->allowed[0].last);
-	ASSERT_EQ(1u, value->label_count);
-	EXPECT_EQ(UINT64_MAX, value->labels[0].code);
-	ASSERT_EQ(3u, value->labels[0].name.size);
-	EXPECT_EQ(0, std::memcmp("A\0B", value->labels[0].name.data, 3));
-	EXPECT_EQ(INT64_MIN, value->scale.factor.numerator);
-	EXPECT_EQ(UINT64_MAX, value->scale.factor.denominator);
-	EXPECT_EQ(INT64_MAX, value->scale.bias.numerator);
-	ASSERT_EQ(1u, value->scale.sentinel_count);
-	EXPECT_EQ(UINT64_MAX, value->scale.sentinels[0].code);
-}
-
-TEST(SchemaJson, RejectsNonIntegerOrOutOfRangeNumbers)
-{
-	const char *ids[] = {"0", "-1", "1.0", "1e0", "\"1\"",
-		"4294967296", "18446744073709551616"};
-
-	for (const char *id : ids) {
-		SCOPED_TRACE(id);
-		std::string root = "{\"id\":" + std::string(id) +
-			",\"kind\":\"group\",\"group\":{\"children\":[]}}";
+	for (const char *number : numbers) {
+		SCOPED_TRACE(number);
 		json_owner owner;
 
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(root)), &owner));
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(definition(
+			"{\"index_number\":\"1.\",\"number_of_bits\":" +
+			std::string(number) + "}"), &owner));
 	}
-	const char *numerators[] = {"-9223372036854775809",
-		"9223372036854775808", "0.5", "\"0\""};
+	const char *indexes[] = {"", ".", "1..2", "-1", "1.x", "1/2",
+		"4294967296", "1.2..", "1 ", "1\\u0000"};
 
-	for (const char *numerator : numerators) {
-		SCOPED_TRACE(numerator);
-		std::string scale = ",\"scale\":{\"factor\":{\"numerator\":" +
-			std::string(numerator) + ",\"denominator\":1},"
-			"\"bias\":{\"numerator\":0,\"denominator\":1}}";
+	for (const char *index : indexes) {
+		SCOPED_TRACE(index);
 		json_owner owner;
 
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(group(1,
-			scalar(2, "scaled", 64, "unsigned", scale)))), &owner));
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(definition(
+			"{\"index_number\":\"" + std::string(index) +
+			"\",\"number_of_bits\":8}"), &owner));
 	}
 }
 
-TEST(SchemaJson, CopiesNamesAndArraysWithoutRetainingTheInput)
-{
-	std::string text = set(schema(group(1, scalar(2)),
-		"{\"user_message_format\":1}", ",\"name\":\"message\""));
-	auto location = text.find("\"id\":2");
-
-	text.insert(location, "\"name\":\"value\",");
-	const std::string original = text;
-	json_owner owner;
-
-	ASSERT_EQ(VMF_OK, load(text, &owner));
-	EXPECT_EQ(original, text);
-	const vmf_message_schema *loaded = first(owner);
-	const vmf_node *child = loaded->root->as.group.children;
-
-	text.assign(text.size(), 'x');
-	EXPECT_STREQ("message", loaded->name);
-	EXPECT_STREQ("value", child->name);
-	EXPECT_EQ(2u, child->id);
-	EXPECT_EQ(child, vmf_schema_find(loaded, 2));
-	auto limits = vmf_default_limits();
-
-	EXPECT_EQ(VMF_OK, vmf_schema_validate(loaded, &limits, nullptr));
-	const char *names[] = {"\"a\\u0000b\"", "null"};
-
-	for (const char *name : names) {
-		json_owner rejected;
-
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(group(1, ""),
-			"{\"user_message_format\":1}",
-			",\"name\":" + std::string(name))), &rejected));
-	}
-}
-
-} /* namespace */
-
-namespace
-{
-
-TEST(SchemaJson, LoadsTextEncodingsAndFieldLengthControls)
-{
-	const char *encodings[] = {"ascii_7", "ascii_8", "latin_1", "utf_8"};
-
-	for (unsigned i = 0; i < 4; ++i) {
-		json_owner owner;
-		std::string definition = "{\"encoding\":\"" +
-			std::string(encodings[i]) +
-			"\",\"order\":\"msb_first\",\"length\":" +
-			extent("fixed", ",\"fixed\":2", 2, "2") + "}";
-
-		ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-			field(2, "text", definition)))), &owner));
-		const vmf_node *child = first(owner)->root->as.group.children;
-		const vmf_text_definition *text = &child->as.field.as.text;
-
-		EXPECT_EQ(static_cast<vmf_text_encoding>(i), text->encoding);
-		EXPECT_EQ(VMF_BIT_MSB_FIRST, text->order);
-		EXPECT_EQ(2u, text->length.fixed);
-	}
-	const char *kinds[] = {"fixed", "prefix", "field", "remaining"};
-	std::string active[] = {",\"fixed\":1",
-		",\"prefix\":" + encoding(8) + ",\"bias\":-1",
-		",\"field\":2", ""};
-
-	for (unsigned i = 0; i < 4; ++i) {
-		json_owner owner;
-		std::string definition =
-			"{\"order\":\"lsb_first\",\"length\":" +
-			extent(kinds[i], active[i], 0,
-				i == 3 ? "18446744073709551615" : "8") + "}";
-
-		ASSERT_EQ(VMF_OK, load(set(schema(group(1, scalar(2) + "," +
-			field(3, "octets", definition)))), &owner));
-		const vmf_extent_definition *length = &first(owner)->root
-			->as.group.children[1].as.field.as.octets.length;
-
-		EXPECT_EQ(static_cast<vmf_extent_kind>(i), length->kind);
-		EXPECT_EQ(i == 1 ? -1 : 0, length->bias);
-		if (i == 3)
-			EXPECT_EQ(UINT64_MAX, length->maximum);
-	}
-	json_owner bits;
-	std::string definition = "{\"length\":" +
-		extent("fixed", ",\"fixed\":12", 12, "12") + "}";
-
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-		field(2, "bits", definition)))), &bits));
-	EXPECT_EQ(12u, first(bits)->root->as.group.children[0]
-		.as.field.as.bits.length.fixed);
-	json_owner literal;
-
-	definition = "{\"encoding\":\"ascii_7\",\"order\":\"lsb_first\","
-		"\"length\":" + extent("literal", "") + "}";
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-		field(2, "text", definition)))), &literal));
-	EXPECT_EQ(VMF_EXTENT_LITERAL, first(literal)->root->as.group.children[0]
-		.as.field.as.text.length.kind);
-}
-
-TEST(SchemaJson, LoadsAllRepeatControlsAndStableBodies)
-{
-	const char *kinds[] = {"fixed", "prefix", "field", "more_before",
-		"more_after", "recurrence_before"};
-	const vmf_extent_kind expected[] = {VMF_EXTENT_FIXED, VMF_EXTENT_PREFIX,
-		VMF_EXTENT_FIELD, VMF_EXTENT_MORE_BEFORE, VMF_EXTENT_MORE_AFTER,
-		VMF_EXTENT_RECURRENCE_BEFORE};
-	std::string active[] = {",\"fixed\":1", ",\"prefix\":" + encoding(4),
-		",\"field\":2", ",\"more_bit\":true", ",\"more_bit\":false",
-		",\"more_bit\":true"};
-
-	for (unsigned i = 0; i < 6; ++i) {
-		SCOPED_TRACE(kinds[i]);
-		json_owner owner;
-		std::string repeat = "{\"id\":3,\"kind\":\"repeat\","
-			"\"repeat\":{\"count\":" +
-			extent(kinds[i], active[i], i >= 4 ? 1 : 0) +
-			",\"body\":" + group(4, scalar(5)) + "}}";
-
-		ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-			scalar(2) + "," + repeat))), &owner));
-		const vmf_repeat_schema *value =
-			&first(owner)->root->as.group.children[1].as.repeat;
-
-		EXPECT_EQ(expected[i], value->count.kind);
-		EXPECT_EQ(4u, value->body->id);
-		EXPECT_EQ(5u, value->body->as.group.children[0].id);
-		EXPECT_EQ(value->body, vmf_schema_find(first(owner), 4));
-	}
-}
-
-TEST(SchemaJson, LoadsPresenceConditionsAndChoiceArms)
-{
-	std::string present = scalar(3);
-	std::string condition = "{\"kind\":\"condition\",\"condition\":{"
-		"\"mode\":\"any\",\"terms\":[{\"field\":2,\"values\":[{"
-		"\"first\":1,\"last\":2}]}]}}";
-
-	present.insert(1, "\"presence\":" + condition + ",");
-	std::string bit = scalar(4);
-
-	bit.insert(1, "\"presence\":{\"kind\":\"bit\",\"present_bit\":true},");
-	std::string choice = "{\"id\":5,\"kind\":\"choice\",\"choice\":{"
-		"\"selector\":2,\"cases\":[{\"values\":[{"
-		"\"first\":1,\"last\":2}],\"body\":" + scalar(6) +
-		"}],\"otherwise\":" + group(7, "") + "}}";
-	json_owner owner;
-
-	std::string children_json =
-		scalar(2) + "," + present + "," + bit + "," + choice;
-
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1, children_json))), &owner));
-	const vmf_node *children = first(owner)->root->as.group.children;
-	const vmf_condition *loaded = &children[1].presence.condition;
-
-	EXPECT_EQ(VMF_PRESENCE_CONDITION, children[1].presence.kind);
-	EXPECT_EQ(VMF_CONDITION_ANY, loaded->mode);
-	EXPECT_FALSE(loaded->negate);
-	ASSERT_EQ(1u, loaded->term_count);
-	EXPECT_EQ(2u, loaded->terms[0].field);
-	EXPECT_EQ(UINT64_MAX, loaded->terms[0].mask);
-	EXPECT_FALSE(loaded->terms[0].negate);
-	EXPECT_EQ(VMF_PRESENCE_BIT, children[2].presence.kind);
-	EXPECT_TRUE(children[2].presence.present_bit);
-	const vmf_choice_schema *arm = &children[3].as.choice;
-
-	EXPECT_EQ(2u, arm->selector);
-	EXPECT_EQ(UINT64_MAX, arm->mask);
-	ASSERT_EQ(1u, arm->case_count);
-	EXPECT_EQ(1u, arm->cases[0].values[0].first);
-	EXPECT_EQ(6u, arm->cases[0].body->id);
-	EXPECT_EQ(7u, arm->otherwise->id);
-}
-
-TEST(SchemaJson, ExplicitMasksNegationsAndFallbackOmissionArePreserved)
-{
-	std::string controlled = scalar(3);
-
-	controlled.insert(1, "\"presence\":{\"kind\":\"condition\","
-		"\"condition\":{\"mode\":\"all\",\"negate\":true,\"terms\":[{"
-		"\"field\":2,\"mask\":3,\"negate\":true,\"values\":[{"
-		"\"first\":1,\"last\":1}]}]}},");
-	std::string choice = "{\"id\":4,\"kind\":\"choice\",\"choice\":{"
-		"\"selector\":2,\"mask\":3,\"cases\":[{\"values\":[{"
-		"\"first\":1,\"last\":1}],\"body\":" + scalar(5) + "}]}}";
-	json_owner owner;
-
-	ASSERT_EQ(VMF_OK, load(set(schema(group(1,
-		scalar(2) + "," + controlled + "," + choice))), &owner));
-	const vmf_node *children = first(owner)->root->as.group.children;
-
-	EXPECT_EQ(VMF_CONDITION_ALL, children[1].presence.condition.mode);
-	EXPECT_TRUE(children[1].presence.condition.negate);
-	EXPECT_TRUE(children[1].presence.condition.terms[0].negate);
-	EXPECT_EQ(3u, children[1].presence.condition.terms[0].mask);
-	EXPECT_EQ(3u, children[2].as.choice.mask);
-	EXPECT_EQ(nullptr, children[2].as.choice.otherwise);
-}
-
-TEST(SchemaJson, RequiresActiveControlsAndRejectsInactiveMembers)
-{
-	std::vector<std::string> definitions = {
-		"{\"id\":2,\"kind\":\"field\",\"field\":{\"kind\":\"unsigned\","
-		"\"scalar\":{\"encoding\":{\"bit_width\":8,"
-		"\"representation\":\"unsigned\"}}}}",
-		"{\"id\":2,\"kind\":\"field\",\"field\":{\"kind\":\"unsigned\","
-		"\"scalar\":{\"encoding\":" + encoding(8) + "},\"bits\":{}}}",
-		scalar(2, "unsigned", 8, "unsigned", ",\"scale\":{}"),
-		scalar(2, "scaled")};
-	std::string omitted = scalar(2);
-
-	omitted.insert(1, "\"presence\":{\"kind\":\"bit\"},");
-	definitions.push_back(omitted);
-	omitted = scalar(2);
-	omitted.insert(1,
-		"\"presence\":{\"kind\":\"always\",\"present_bit\":true},");
-	definitions.push_back(omitted);
-	const char *lengths[] = {
-		"{\"kind\":\"fixed\",\"fixed\":1,\"maximum\":1}",
-		"{\"kind\":\"fixed\",\"minimum\":0,\"maximum\":1}",
-		"{\"kind\":\"prefix\",\"minimum\":0,\"maximum\":1}",
-		"{\"kind\":\"field\",\"minimum\":0,\"maximum\":1}",
-		"{\"kind\":\"fixed\",\"fixed\":1,\"minimum\":0,"
-		"\"maximum\":1,\"prefix\":{}}"};
-
-	for (const char *length : lengths)
-		definitions.push_back(field(2, "octets",
-			"{\"order\":\"lsb_first\",\"length\":" +
-			std::string(length) + "}"));
-	for (const std::string &definition : definitions) {
-		SCOPED_TRACE(definition);
-		json_owner owner;
-
-		EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(group(1,
-			definition))), &owner));
-	}
-}
-
-TEST(SchemaJson, NativeValidationErrorsKeepSchemaAndNodeLocations)
+TEST(SchemaJson, AtomicCoreValidationRetainsOwnerIndependentLocations)
 {
 	json_owner owner;
 	vmf_schema_json_error error = {};
-	std::string valid = schema(group(1, ""));
-	std::string invalid = schema(group(1, scalar(2, "unsigned", 0)),
-		"{\"user_message_format\":2}");
+	std::string invalid = message(field(7, 0));
 
-	EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(valid + "," + invalid),
-		&owner, &error));
+	invalid.replace(invalid.find("K01.1"), 5, "K01.2");
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		load(registry(message(field(1, 8)) + "," + invalid),
+			&owner, &error));
 	EXPECT_EQ(nullptr, owner.document);
 	EXPECT_EQ(1u, error.schema_index);
-	EXPECT_EQ(2u, error.node_id);
-	EXPECT_EQ(SIZE_MAX, error.byte_offset);
+	EXPECT_EQ(0u, error.index_position);
 	EXPECT_NE(nullptr, error.message);
 	json_owner duplicate;
 
-	EXPECT_EQ(VMF_DUPLICATE_MESSAGE, load(set(valid + "," + valid),
+	EXPECT_EQ(VMF_DUPLICATE_MESSAGE, load(registry(
+		message(field(1, 8)) + "," + message(field(1, 8))),
 		&duplicate, &error));
 	EXPECT_EQ(nullptr, duplicate.document);
-	EXPECT_EQ(1u, error.schema_index);
 }
 
-TEST(SchemaJson, EnforcesInputMemorySchemaNodeDepthAndFieldLimits)
+TEST(SchemaJson, EnforcesInputMemoryAndSchemaLimits)
 {
-	const std::string input = set(schema(group(1, scalar(2))));
+	const std::string input = definition(field(1, 8));
 	auto options = vmf_schema_json_default_options();
 	json_owner owner;
 
@@ -631,24 +253,437 @@ TEST(SchemaJson, EnforcesInputMemorySchemaNodeDepthAndFieldLimits)
 	options.limits.max_schemas = 0;
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED, load(input, &owner, nullptr, &options));
 	options = vmf_schema_json_default_options();
-	options.limits.max_schema_nodes = 1;
-	EXPECT_EQ(VMF_LIMIT_EXCEEDED, load(input, &owner, nullptr, &options));
-	options = vmf_schema_json_default_options();
-	options.limits.max_depth = 0;
-	EXPECT_EQ(VMF_LIMIT_EXCEEDED, load(input, &owner, nullptr, &options));
-	options = vmf_schema_json_default_options();
 	options.limits.max_field_bits = 7;
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED, load(input, &owner, nullptr, &options));
-	EXPECT_EQ(nullptr, owner.document);
-	std::string nested = scalar(300);
+}
 
-	for (unsigned id = 299; id; --id)
-		nested = group(id, nested);
-	options = vmf_schema_json_default_options();
-	options.limits.max_depth = 8;
-	EXPECT_EQ(VMF_LIMIT_EXCEEDED,
-		load(set(schema(nested)), &owner, nullptr, &options));
-	EXPECT_EQ(nullptr, owner.document);
+TEST(SchemaJson, CopiesIndexesKeysAndExactScaleWithoutRetainingInput)
+{
+	std::string input = definition(
+		"{\"index_number\":\"2.3.1\",\"number_of_bits\":64,"
+		"\"key\":\"binding\",\"constant\":18446744073709551615,"
+		"\"allowed\":[{\"first\":0,\"last\":18446744073709551615}]},"
+		"{\"index_number\":\"7.\",\"number_of_bits\":7,"
+		"\"encode_type\":\"scaled\",\"representation\":\"unsigned\","
+		"\"scale\":{\"factor\":{\"numerator\":1,\"denominator\":10},"
+		"\"bias\":{\"numerator\":-2,\"denominator\":3},"
+		"\"sentinels\":[127]}}");
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(input, &owner));
+	input.assign(input.size(), 'x');
+	const auto *set = vmf_schema_json_schemas(owner.document);
+
+	ASSERT_EQ(1u, set->message_count);
+	const auto *schema = &set->messages[0];
+	const auto *index = vmf_schema_find_key(schema, {"binding", 7});
+
+	ASSERT_NE(nullptr, index);
+	ASSERT_EQ(3u, index->index_number.count);
+	EXPECT_EQ(2u, index->index_number.parts[0]);
+	EXPECT_EQ(3u, index->index_number.parts[1]);
+	EXPECT_EQ(1u, index->index_number.parts[2]);
+	vmf_index_info info = {};
+
+	ASSERT_EQ(VMF_OK, vmf_schema_index_info(set, schema, index, &info));
+	EXPECT_EQ(VMF_FIELD_UNSIGNED, info.kind);
+	EXPECT_EQ(VMF_BIT_LSB_FIRST, info.integer.order);
+	EXPECT_EQ(UINT64_MAX, info.constant.value);
+	ASSERT_EQ(1u, info.allowed_count);
+	EXPECT_EQ(UINT64_MAX, info.allowed[0].last);
+	ASSERT_EQ(VMF_OK, vmf_schema_index_info(set, schema,
+		&schema->indexes[1], &info));
+	ASSERT_NE(nullptr, info.scale);
+	EXPECT_EQ(1, info.scale->factor.numerator);
+	EXPECT_EQ(10u, info.scale->factor.denominator);
+	EXPECT_EQ(-2, info.scale->bias.numerator);
+	EXPECT_EQ(3u, info.scale->bias.denominator);
+	ASSERT_EQ(1u, info.scale->sentinel_count);
+	EXPECT_EQ(127u, info.scale->sentinels[0]);
+}
+
+TEST(SchemaJson, NamedEditionResolutionAndCompleteOverridesBelongToCore)
+{
+	for (const char *profile : {"C", "D", "D1"}) {
+		SCOPED_TRACE(profile);
+		std::string input = registry(message(field(1, 8)),
+			",\"message_standard\":\"MIL-STD-6017B\"");
+		size_t position = input.find("\"envelope\":\"C\"");
+
+		input.replace(position, 14,
+			"\"envelope\":\"" + std::string(profile) + "\"");
+		json_owner owner;
+
+		ASSERT_EQ(VMF_OK, load(input, &owner));
+		const auto *set = vmf_schema_json_schemas(owner.document);
+		vmf_message_id id = {};
+
+		ASSERT_EQ(VMF_OK,
+			vmf_schema_message_id(set, &set->messages[0], &id));
+		EXPECT_EQ(2u, id.user_message_format);
+		EXPECT_TRUE(id.standard_version.present);
+		EXPECT_EQ(std::strcmp(profile, "C") ? 7u : 8u,
+			id.standard_version.value);
+	}
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(registry(message(field(1, 8),
+		",\"standard_version\":\"absent\",\"subtype\":0"),
+		",\"message_standard\":\"MIL-STD-6017B\""), &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+	vmf_message_id id = {};
+
+	ASSERT_EQ(VMF_OK,
+		vmf_schema_message_id(set, &set->messages[0], &id));
+	EXPECT_FALSE(id.standard_version.present);
+	EXPECT_TRUE(id.subtype.present);
+	EXPECT_EQ(0u, id.subtype.value);
+}
+
+TEST(SchemaJson, OptionalZeroIdentityRemainsDistinctFromAbsence)
+{
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(registry(message(field(1, 8)) + "," +
+		message(field(1, 8), ",\"standard_version\":0") + "," +
+		message(field(1, 8), ",\"subtype\":0")), &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+	vmf_message_id identities[3] = {};
+
+	for (size_t i = 0; i < 3; ++i)
+		ASSERT_EQ(VMF_OK, vmf_schema_message_id(set,
+			&set->messages[i], &identities[i]));
+	EXPECT_FALSE(identities[0].standard_version.present);
+	EXPECT_TRUE(identities[1].standard_version.present);
+	EXPECT_EQ(0u, identities[1].standard_version.value);
+	EXPECT_TRUE(identities[2].subtype.present);
+	EXPECT_FALSE(vmf_message_id_equal(&identities[0], &identities[1]));
+	EXPECT_FALSE(vmf_message_id_equal(&identities[0], &identities[2]));
+}
+
+TEST(SchemaJson, RetainsTypedControlsPathsAndCountDeclarations)
+{
+	json_owner owner;
+	const std::string indexes =
+		"{\"index_number\":\"1.\",\"indicator\":\"fpi\","
+		"\"target\":\"1.1\"},"
+		"{\"index_number\":\"1.1\",\"number_of_bits\":9},"
+		"{\"index_number\":\"2.\",\"number_of_bits\":3},"
+		"{\"index_number\":\"3.\",\"number_of_bits\":8,"
+		"\"repeat_code\":\"R1\"}";
+
+	ASSERT_EQ(VMF_OK, load(registry(message(indexes,
+		",\"repeats\":[{\"repeat_code\":\"R1\",\"count_from\":\"2.\","
+		"\"maximum\":4,\"minimum\":0,\"bias\":0}]")), &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+	const auto *schema = &set->messages[0];
+	vmf_index_info info = {};
+
+	ASSERT_EQ(VMF_OK, vmf_schema_index_info(set, schema,
+		&schema->indexes[0], &info));
+	EXPECT_EQ(VMF_INDICATOR_FPI, info.indicator);
+	EXPECT_EQ(1u, info.number_of_bits);
+	ASSERT_EQ(2u, info.target.as.index.count);
+	EXPECT_EQ(1u, info.target.as.index.parts[1]);
+	ASSERT_EQ(1u, schema->repeat_count);
+	EXPECT_EQ(VMF_REPEAT_FIELD, schema->repeats[0].kind);
+	EXPECT_TRUE(schema->repeats[0].minimum.present);
+	EXPECT_TRUE(schema->repeats[0].bias.present);
+	EXPECT_EQ(0, schema->repeats[0].bias.value);
+}
+
+TEST(SchemaJson, FieldLengthsAndConditionsPreserveExplicitOptionalValues)
+{
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(definition(field(1, 3) + ","
+		"{\"index_number\":\"2.\",\"number_of_bits\":28,"
+		"\"encode_type\":\"text\",\"text_encoding\":\"ascii_7\","
+		"\"length_from\":\"1.\",\"length_bias\":0,"
+		"\"when\":{\"mode\":\"any\",\"negate\":false,\"terms\":[{"
+		"\"field\":\"1.\",\"mask\":0,\"negate\":false,"
+		"\"values\":[{\"first\":0,\"last\":0}]}]}}"), &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+	const auto *r = set->messages[0].indexes[1].refinements;
+
+	ASSERT_NE(nullptr, r);
+	EXPECT_TRUE(r->length_bias.present);
+	EXPECT_EQ(0, r->length_bias.value);
+	ASSERT_NE(nullptr, r->when);
+	EXPECT_EQ(VMF_CONDITION_ANY, r->when->mode);
+	EXPECT_FALSE(r->when->negate);
+	ASSERT_EQ(1u, r->when->term_count);
+	EXPECT_TRUE(r->when->terms[0].mask.present);
+	EXPECT_EQ(0u, r->when->terms[0].mask.value);
+}
+
+TEST(SchemaJson, NativeAndJsonSemanticFailuresHaveMatchingLocations)
+{
+	uint32_t parts[] = {1};
+	vmf_index_schema index = {};
+	vmf_message_schema schema = {};
+	vmf_schema_set set = {};
+
+	index.index_number = {parts, 1};
+	schema.message_number = {1, 1};
+	schema.indexes = &index;
+	schema.index_count = 1;
+	set.envelope = VMF_ENVELOPE_C;
+	set.messages = &schema;
+	set.message_count = 1;
+	auto limits = vmf_default_limits();
+	vmf_error native = {};
+	json_owner owner;
+	vmf_schema_json_error json = {};
+
+	EXPECT_EQ(vmf_schema_set_validate(&set, &limits, nullptr, &native),
+		load(definition(field(1, 0)), &owner, &json));
+	EXPECT_EQ(native.schema_index, json.schema_index);
+	EXPECT_EQ(native.index_position, json.index_position);
+	EXPECT_EQ(native.property, json.property);
+	EXPECT_EQ(native.related_index_position, json.related_index_position);
+}
+
+TEST(SchemaJson, EveryEncodingUsesTheNativeResolvedInterpretation)
+{
+	json_owner owner;
+	const char *indexes =
+		"{\"index_number\":\"1\",\"number_of_bits\":1,"
+		"\"encode_type\":\"bool\"},"
+		"{\"index_number\":\"2\",\"number_of_bits\":64},"
+		"{\"index_number\":\"3\",\"number_of_bits\":9,"
+		"\"encode_type\":\"signed\","
+		"\"representation\":\"ones_complement\"},"
+		"{\"index_number\":\"4\",\"number_of_bits\":3,"
+		"\"encode_type\":\"enum\"},"
+		"{\"index_number\":\"5\",\"number_of_bits\":65,"
+		"\"encode_type\":\"bits\"},"
+		"{\"index_number\":\"6\",\"number_of_bits\":16,"
+		"\"encode_type\":\"octets\",\"bit_order\":\"msb_first\"},"
+		"{\"index_number\":\"7\",\"number_of_bits\":14,"
+		"\"encode_type\":\"text\"},"
+		"{\"index_number\":\"8\",\"number_of_bits\":16,"
+		"\"encode_type\":\"text\",\"text_encoding\":\"latin_1\"},"
+		"{\"index_number\":\"9\",\"number_of_bits\":14,"
+		"\"encode_type\":\"literal\"}";
+
+	ASSERT_EQ(VMF_OK, load(definition(indexes), &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+	const auto *message = &set->messages[0];
+	const vmf_field_kind kinds[] = {VMF_FIELD_BOOL, VMF_FIELD_UNSIGNED,
+		VMF_FIELD_SIGNED, VMF_FIELD_ENUM, VMF_FIELD_BITS,
+		VMF_FIELD_OCTETS, VMF_FIELD_TEXT, VMF_FIELD_TEXT,
+		VMF_FIELD_TEXT};
+
+	for (size_t i = 0; i < message->index_count; ++i) {
+		vmf_index_info info = {};
+
+		ASSERT_EQ(VMF_OK, vmf_schema_index_info(set, message,
+			&message->indexes[i], &info));
+		EXPECT_EQ(kinds[i], info.kind);
+		if (i == 2)
+			EXPECT_EQ(VMF_INTEGER_ONES_COMPLEMENT,
+				info.integer.representation);
+		if (i == 5)
+			EXPECT_EQ(VMF_BIT_MSB_FIRST, info.integer.order);
+		if (i == 6)
+			EXPECT_EQ(VMF_TEXT_ASCII_7, info.text_encoding);
+		if (i == 7)
+			EXPECT_EQ(VMF_TEXT_LATIN_1, info.text_encoding);
+		if (i == 8)
+			EXPECT_TRUE(info.literal);
+	}
+}
+
+TEST(SchemaJson, ZeroCapacityVariableFieldHasNativeParity)
+{
+	uint32_t addresses[] = {1, 2};
+	vmf_index_schema indexes[2] = {};
+	vmf_index_refinements refinements = {};
+	vmf_message_schema message = {};
+	vmf_schema_set set = {};
+
+	indexes[0].index_number = {addresses, 1};
+	indexes[0].number_of_bits = 3;
+	indexes[1].index_number = {addresses + 1, 1};
+	indexes[1].encode_type = VMF_ENCODE_BITS;
+	indexes[1].refinements = &refinements;
+	refinements.length_from = indexes[0].index_number;
+	message.message_number = {1, 1};
+	message.indexes = indexes;
+	message.index_count = 2;
+	set.envelope = VMF_ENVELOPE_C;
+	set.messages = &message;
+	set.message_count = 1;
+	auto limits = vmf_default_limits();
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK,
+		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
+	ASSERT_EQ(VMF_OK, load(definition(field(1, 3) + ","
+		"{\"index_number\":\"2\",\"number_of_bits\":0,"
+		"\"encode_type\":\"bits\",\"length_from\":\"1\"}"), &owner));
+	const auto *loaded = vmf_schema_json_schemas(owner.document);
+	vmf_index_info native = {}, json = {};
+
+	ASSERT_EQ(VMF_OK,
+		vmf_schema_index_info(&set, &message, &indexes[1], &native));
+	ASSERT_EQ(VMF_OK, vmf_schema_index_info(loaded, &loaded->messages[0],
+		&loaded->messages[0].indexes[1], &json));
+	EXPECT_TRUE(json.variable);
+	EXPECT_EQ(native.capacity_units, json.capacity_units);
+	EXPECT_EQ(0u, json.capacity_units);
+}
+
+TEST(SchemaJson, RejectsMalformedScopeSpellingAndInactiveRepeatMembers)
+{
+	const char *paths[] = {"R", "R1(", "R1()", "R1(-1)", "R1(2))",
+		"R1(18446744073709551616)", "R1/", "R1//R2", "G1"};
+
+	for (const char *path : paths) {
+		SCOPED_TRACE(path);
+		json_owner owner;
+
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(definition(
+			"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"repeat_code\":\"" + std::string(path) + "\"}"),
+			&owner));
+	}
+	const char *declarations[] = {
+		"{\"repeat_code\":\"R1\"}",
+		"{\"repeat_code\":\"R1\",\"count\":2,\"maximum\":2}",
+		"{\"repeat_code\":\"R1\",\"count\":2,\"count_from\":\"1\"}",
+		"{\"repeat_code\":\"R1\",\"count_from\":\"1\"}",
+		"{\"repeat_code\":\"R1(2)\",\"count\":2}"};
+
+	for (const char *declaration : declarations) {
+		SCOPED_TRACE(declaration);
+		json_owner owner;
+
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(registry(message(
+			field(1, 8), ",\"repeats\":[" +
+			std::string(declaration) + "]")), &owner));
+	}
+}
+
+TEST(SchemaJson, NativeAndJsonScopeTopologyHaveIdenticalValidation)
+{
+	for (unsigned example = 0; example < 5; ++example) {
+		SCOPED_TRACE(example);
+		uint32_t numbers[] = {1, 2, 3};
+		vmf_group_id groups[] = {1, 2};
+		vmf_repeat_component memberships[3] = {};
+		vmf_index_schema indexes[3] = {};
+		vmf_repeat_definition repeat = {};
+		vmf_message_schema message = {};
+		vmf_schema_set set = {};
+		std::string json;
+
+		for (size_t i = 0; i < 3; ++i) {
+			indexes[i].index_number = {numbers + i, 1};
+			indexes[i].number_of_bits = 1;
+			memberships[i].id = 1;
+		}
+		message.message_number = {1, 1};
+		message.indexes = indexes;
+		message.index_count = example < 2 ? 3 : 2;
+		set.envelope = VMF_ENVELOPE_C;
+		set.messages = &message;
+		set.message_count = 1;
+		if (example == 0 || example == 2) {
+			repeat.id = 1;
+			repeat.kind = VMF_REPEAT_FIXED;
+			repeat.count = 2;
+			message.repeats = &repeat;
+			message.repeat_count = 1;
+			indexes[0].group_code = {groups, 1};
+			indexes[1].group_code = {groups, 1};
+			indexes[1].repeat_code = {memberships + 1, 1};
+			if (example == 0) {
+				indexes[2].repeat_code = {memberships + 2, 1};
+				json = member(1,
+					",\"group_code\":\"G1\"") + "," +
+					member(2, ",\"group_code\":\"G1\","
+					"\"repeat_code\":\"R1\"") + "," +
+					member(3, ",\"repeat_code\":\"R1\"");
+			} else {
+				indexes[0].repeat_code = {memberships, 1};
+				json = member(1, ",\"group_code\":\"G1\","
+					"\"repeat_code\":\"R1\"") + "," +
+					member(2, ",\"group_code\":\"G1\","
+					"\"repeat_code\":\"R1\"");
+			}
+			json = registry(::message(json, ",\"repeats\":[{"
+				"\"repeat_code\":\"R1\",\"count\":2}]"));
+		} else if (example == 1) {
+			indexes[0].group_code = {groups, 1};
+			indexes[2].group_code = {groups, 1};
+			json = definition(
+				"{\"index_number\":\"1\",\"number_of_bits\":1,"
+				"\"group_code\":\"G1\"},"
+				"{\"index_number\":\"2\",\"number_of_bits\":1},"
+				"{\"index_number\":\"3\",\"number_of_bits\":1,"
+				"\"group_code\":\"G1\"}");
+		} else {
+			indexes[0].group_code = {groups, 2};
+			indexes[1].group_code = example == 3 ?
+				vmf_group_path{groups + 1, 1} :
+				vmf_group_path{groups, 2};
+			json = definition(
+				"{\"index_number\":\"1\",\"number_of_bits\":1,"
+				"\"group_code\":\"G1/G2\"},"
+				"{\"index_number\":\"2\",\"number_of_bits\":1,"
+				"\"group_code\":\"" +
+				std::string(example == 3 ? "G2" : "G1/G2") +
+				"\"}");
+		}
+		auto limits = vmf_default_limits();
+		vmf_error native = {};
+		vmf_schema_json_error loaded = {};
+		json_owner owner;
+		vmf_status expected = example == 4 ?
+			VMF_OK : VMF_INVALID_SCHEMA;
+
+		EXPECT_EQ(expected, vmf_schema_set_validate(&set, &limits,
+			nullptr, &native));
+		EXPECT_EQ(expected, load(json, &owner, &loaded));
+		EXPECT_EQ(native.schema_index, loaded.schema_index);
+		EXPECT_EQ(native.index_position, loaded.index_position);
+		EXPECT_EQ(native.property, loaded.property);
+		EXPECT_EQ(native.related_index_position,
+			loaded.related_index_position);
+		EXPECT_EQ(native.related_scope_id, loaded.related_scope_id);
+	}
+}
+
+TEST(SchemaJson, InactiveRefinementsAreRejectedByNativeValidation)
+{
+	const char *indexes[] = {
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"encode_type\":\"bits\",\"bit_order\":\"msb_first\"}",
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"encode_type\":\"bits\",\"bit_order\":\"lsb_first\"}",
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"length_bias\":0}",
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"text_encoding\":\"ascii_8\"}",
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"encode_type\":\"signed\"}",
+		"{\"index_number\":\"1\",\"number_of_bits\":8,"
+			"\"indicator\":\"fpi\",\"target\":\"2\"},"
+			"{\"index_number\":\"2\",\"number_of_bits\":8}"};
+
+	for (const char *index : indexes) {
+		SCOPED_TRACE(index);
+		json_owner owner;
+		vmf_schema_json_error error = {};
+
+		EXPECT_EQ(VMF_INVALID_SCHEMA, load(definition(index),
+			&owner, &error));
+		EXPECT_EQ(0u, error.schema_index);
+		EXPECT_EQ(0u, error.index_position);
+		EXPECT_EQ(VMF_PROPERTY_ENCODING, error.property);
+	}
 }
 
 struct json_allocation_log {
@@ -682,7 +717,31 @@ static void json_deallocate(void *user, void *memory)
 
 TEST(SchemaJson, EveryAllocatorFailureRollsBackAllOwnedAndScratchStorage)
 {
-	const std::string input = set(schema(group(1, scalar(2))));
+	const std::string input = registry(message(
+		"{\"index_number\":\"1\",\"number_of_bits\":3,"
+		"\"key\":\"count\",\"constant\":2,"
+		"\"allowed\":[{\"first\":0,\"last\":4}]},"
+		"{\"index_number\":\"2\",\"number_of_bits\":28,"
+		"\"encode_type\":\"text\",\"length_from\":\"1\","
+		"\"length_bias\":0,\"when\":{\"mode\":\"any\",\"terms\":[{"
+		"\"field\":\"1\",\"mask\":0,\"negate\":false,"
+		"\"values\":[{\"first\":0,\"last\":0}]}]}},"
+		"{\"index_number\":\"3\",\"number_of_bits\":7,"
+		"\"encode_type\":\"scaled\",\"scale\":{"
+		"\"factor\":{\"numerator\":1,\"denominator\":10},"
+		"\"bias\":{\"numerator\":0,\"denominator\":1},"
+		"\"sentinels\":[127]}},"
+		"{\"index_number\":\"4\",\"indicator\":\"gpi\","
+		"\"target\":\"G1\"},"
+		"{\"index_number\":\"4.1\",\"number_of_bits\":8,"
+		"\"group_code\":\"G1\"},"
+		"{\"index_number\":\"5\",\"indicator\":\"fri\","
+		"\"repeat_code\":\"R1(2)\"},"
+		"{\"index_number\":\"5.1\",\"number_of_bits\":3,"
+		"\"repeat_code\":\"R1\"},"
+		"{\"index_number\":\"6\",\"number_of_bits\":8,"
+		"\"repeat_code\":\"R2\"}",
+		",\"repeats\":[{\"repeat_code\":\"R2\",\"count\":1}]"));
 	json_allocation_log log;
 	vmf_allocator allocator = {json_allocate, json_deallocate, &log};
 	auto options = vmf_schema_json_default_options();
@@ -728,13 +787,13 @@ TEST(SchemaJson, InvalidDefinitionsAlsoReleaseEveryCustomAllocation)
 	options.allocator = &allocator;
 	json_owner owner;
 
-	EXPECT_EQ(VMF_INVALID_SCHEMA, load(set(schema(group(1,
-		scalar(2, "unsigned", 0)))), &owner, nullptr, &options));
+	EXPECT_EQ(VMF_INVALID_SCHEMA, load(definition(field(1, 0)),
+		&owner, nullptr, &options));
 	EXPECT_EQ(0u, log.live);
 	EXPECT_EQ(nullptr, owner.document);
 	allocator.deallocate = nullptr;
 	EXPECT_EQ(VMF_INVALID_ARGUMENT,
-		load("{\"schemas\":[]}", &owner, nullptr, &options));
+		load(empty_definition, &owner, nullptr, &options));
 	EXPECT_EQ(0u, log.live);
 }
 
@@ -787,12 +846,12 @@ TEST(SchemaJson, LiveMemoryBudgetIncludesAllCustomAllocatorRequests)
 {
 	std::string children;
 
-	for (unsigned i = 2; i < 100; ++i) {
+	for (unsigned i = 1; i < 100; ++i) {
 		if (!children.empty())
 			children += ",";
-		children += scalar(i);
+		children += field(i, 8);
 	}
-	std::string input = set(schema(group(1, children)));
+	std::string input = definition(children);
 	json_memory_log log;
 	vmf_allocator allocator = {
 		json_memory_allocate, json_memory_deallocate, &log};
@@ -866,84 +925,10 @@ TEST(SchemaJson, RejectsMisalignedAllocatorStorageBeforeUsingIt)
 	json_owner owner;
 
 	EXPECT_EQ(VMF_INVALID_ARGUMENT,
-		load("{\"schemas\":[]}", &owner, nullptr, &options));
+		load(empty_definition, &owner, nullptr, &options));
 	EXPECT_EQ(nullptr, owner.document);
 	EXPECT_EQ(0u, log.live);
 	EXPECT_EQ(nullptr, log.base);
-}
-
-TEST(SchemaJson, RejectsNodeNamesContainingEmbeddedNul)
-{
-	std::string node = scalar(2);
-
-	node.insert(1, "\"name\":\"a\\u0000b\",");
-	json_owner owner;
-
-	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		load(set(schema(group(1, node))), &owner));
-}
-
-} /* namespace */
-
-namespace
-{
-
-TEST(SchemaJson, PreservesUnsupportedSchemaFeatureStatus)
-{
-	std::string definition = "{\"length\":" +
-		extent("remaining", "") + "}";
-	json_owner owner;
-	vmf_schema_json_error error = {};
-
-	EXPECT_EQ(VMF_UNSUPPORTED_SCHEMA_FEATURE,
-		load(set(schema(group(1, field(2, "bits", definition)))),
-			&owner, &error));
-	EXPECT_EQ(nullptr, owner.document);
-	EXPECT_EQ(VMF_UNSUPPORTED_SCHEMA_FEATURE, error.status);
-	EXPECT_EQ(0u, error.schema_index);
-	EXPECT_EQ(2u, error.node_id);
-}
-
-} /* namespace */
-
-namespace
-{
-
-TEST(SchemaJson, DepthLimitCountsTheRootAsZeroAndAllowsDeepValidTrees)
-{
-	std::string node = scalar(300);
-
-	for (unsigned id = 299; id; --id)
-		node = group(id, node);
-	std::string input = set(schema(node));
-	auto options = vmf_schema_json_default_options();
-
-	options.limits.max_depth = 299;
-	{
-		json_owner owner;
-
-		ASSERT_EQ(VMF_OK, load(input, &owner, nullptr, &options));
-		EXPECT_NE(nullptr, vmf_schema_find(first(owner), 300));
-	}
-	options.limits.max_depth = 298;
-	json_owner owner;
-
-	EXPECT_EQ(VMF_LIMIT_EXCEEDED, load(input, &owner, nullptr, &options));
-	EXPECT_EQ(nullptr, owner.document);
-}
-
-TEST(SchemaJson, EmptySetPermitsZeroSchemaNodeAndDepthLimits)
-{
-	auto options = vmf_schema_json_default_options();
-
-	options.limits.max_schemas = 0;
-	options.limits.max_schema_nodes = 0;
-	options.limits.max_depth = 0;
-	json_owner owner;
-
-	ASSERT_EQ(VMF_OK,
-		load("{\"schemas\":[]}", &owner, nullptr, &options));
-	EXPECT_EQ(0u, vmf_schema_json_schemas(owner.document)->count);
 }
 
 } /* namespace */

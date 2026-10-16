@@ -1,4 +1,5 @@
 #include "envelope.hpp"
+#include "schema_validation.hpp"
 
 #include <cstring>
 
@@ -28,7 +29,8 @@ struct header_io {
 static bool fail(header_io *io, vmf_status status)
 {
 	if (io->error.status == VMF_OK)
-		io->error = {status, io->bit, 0, io->message_index};
+		io->error = {status, io->bit, SIZE_MAX, io->message_index,
+			SIZE_MAX, VMF_PROPERTY_NONE, SIZE_MAX, 0};
 	return false;
 }
 
@@ -526,32 +528,7 @@ static bool markings(header_io *io, vmf_message_header *message)
 
 static bool version_allowed(header_io *io, const vmf_message_id *id)
 {
-	if (!id->standard_version.present)
-		return true;
-	uint8_t code = id->standard_version.value;
-	uint8_t umf = id->user_message_format;
-	bool c = io->profile == VMF_ENVELOPE_C;
-	bool valid = false;
-
-	switch (umf) {
-	case 0:
-	case 5:
-		valid = code <= (c ? 9 : 15);
-		break;
-	case 2:
-		valid = code <= (c ? 9 : 10);
-		break;
-	case 3:
-		valid = !c && code == 0;
-		break;
-	case 7:
-		valid = code >= 6 && code <= (c ? 9 : 15);
-		break;
-	case 8:
-		valid = code >= 3 && code <= (c ? 9 : 10);
-		break;
-	}
-	return require(io, valid);
+	return require(io, message_version_valid(io->profile, id));
 }
 
 static bool message_rules(header_io *io, const vmf_message_header *value,
@@ -890,7 +867,9 @@ vmf_status parse_header(vmf_envelope_version profile, const uint8_t *data,
 	const vmf_limits *limits, bool counting, vmf_envelope_event *event,
 	size_t *needed, vmf_error *error)
 {
-	vmf_error result = {VMF_INVALID_ARGUMENT, 0, 0, SIZE_MAX};
+	vmf_error result = {VMF_INVALID_ARGUMENT, 0, SIZE_MAX, SIZE_MAX,
+		SIZE_MAX,
+		VMF_PROPERTY_NONE, SIZE_MAX, 0};
 
 	if (event)
 		*event = {};
@@ -918,7 +897,8 @@ vmf_status parse_header(vmf_envelope_version profile, const uint8_t *data,
 				    : limits->max_header_bytes;
 	io.message_index = SIZE_MAX;
 	io.limits = limits;
-	io.error = {VMF_OK, 0, 0, SIZE_MAX};
+	io.error = {VMF_OK, 0, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+		VMF_PROPERTY_NONE, SIZE_MAX, 0};
 	void *object = take(&io, layout.size, layout.alignment);
 	bool shortened = false;
 	bool *short_pointer = nullptr;
@@ -950,7 +930,9 @@ vmf_status serialize_header(vmf_envelope_version profile,
 	size_t capacity, size_t *size, const vmf_limits *limits,
 	vmf_error *error)
 {
-	vmf_error result = {VMF_INVALID_ARGUMENT, 0, 0, SIZE_MAX};
+	vmf_error result = {VMF_INVALID_ARGUMENT, 0, SIZE_MAX, SIZE_MAX,
+		SIZE_MAX,
+		VMF_PROPERTY_NONE, SIZE_MAX, 0};
 
 	if (size)
 		*size = 0;
@@ -979,7 +961,8 @@ vmf_status serialize_header(vmf_envelope_version profile,
 	io.size = capacity;
 	io.limits = limits;
 	io.message_index = SIZE_MAX;
-	io.error = {VMF_OK, 0, 0, SIZE_MAX};
+	io.error = {VMF_OK, 0, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+		VMF_PROPERTY_NONE, SIZE_MAX, 0};
 	uint8_t version = event->wire_version;
 	uint64_t pdu = VMF_LENGTH_UNKNOWN;
 

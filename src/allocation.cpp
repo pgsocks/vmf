@@ -11,7 +11,8 @@ namespace vmf_internal
 
 vmf_error make_error(vmf_status status)
 {
-	return {status, 0, 0, SIZE_MAX};
+	return {status, 0, SIZE_MAX, SIZE_MAX, SIZE_MAX,
+		VMF_PROPERTY_NONE, SIZE_MAX, 0};
 }
 
 const vmf_header_fields *fields(const vmf_envelope_event *event)
@@ -39,7 +40,7 @@ static vmf_status configure(const vmf_options *options, configuration *config,
 		options->profile > VMF_ENVELOPE_D1)
 		return VMF_INVALID_ARGUMENT;
 	*config = {options->profile, options->limits,
-		{default_allocate, default_deallocate, nullptr}, {nullptr, 0}};
+		{default_allocate, default_deallocate, nullptr}, nullptr, {}};
 	if (options->allocator) {
 		if (!!options->allocator->allocate !=
 			!!options->allocator->deallocate)
@@ -48,7 +49,7 @@ static vmf_status configure(const vmf_options *options, configuration *config,
 			config->allocator = *options->allocator;
 	}
 	if (options->schemas)
-		config->schemas = *options->schemas;
+		config->schemas = options->schemas;
 	const vmf_limits *limits = &config->limits;
 
 	if (limits->field_chunk_bytes < 4 || !limits->max_header_bytes ||
@@ -70,13 +71,21 @@ static vmf_status configure(const vmf_options *options, configuration *config,
 		return VMF_LIMIT_EXCEEDED;
 	*storage_size =
 		limits->max_header_bytes * 2 + *payload_size + alignment;
-	return validate_schemas_allocated(
-		&config->schemas, limits, &config->allocator, error);
+	if (config->schemas && config->schemas->envelope != config->profile) {
+		if (error)
+			error->property = VMF_PROPERTY_PROFILE;
+		return VMF_INVALID_SCHEMA;
+	}
+	if (!config->schemas)
+		return VMF_OK;
+	return normalize_schemas(config->schemas, limits, &config->allocator,
+		&config->resolved, error);
 }
 
 static bool aligned(void *memory)
 {
-	return reinterpret_cast<uintptr_t>(memory) % alignof(std::max_align_t) == 0;
+	return reinterpret_cast<uintptr_t>(memory) %
+		alignof(std::max_align_t) == 0;
 }
 
 static vmf_status allocate_storage(const configuration *config, size_t size,
@@ -100,6 +109,17 @@ static vmf_status allocate_storage(const configuration *config, size_t size,
 	address = (address + alignment - 1) / alignment * alignment;
 	return payload_init(
 		reinterpret_cast<void *>(address), &config->limits, payload);
+}
+
+vmf_options vmf_options_for_schemas(const vmf_schema_set *schemas)
+{
+	vmf_options options = {};
+
+	options.limits = vmf_default_limits();
+	options.schemas = schemas;
+	if (schemas)
+		options.profile = schemas->envelope;
+	return options;
 }
 
 vmf_status vmf_decoder_create(
@@ -132,6 +152,7 @@ vmf_status vmf_decoder_create(
 	else if (!aligned(memory))
 		status = VMF_INVALID_ARGUMENT;
 	if (status != VMF_OK) {
+		destroy_normalized_set(&config.resolved, &config.allocator);
 		if (memory)
 			config.allocator.deallocate(
 				config.allocator.user, memory);
@@ -185,6 +206,7 @@ vmf_status vmf_encoder_create(const vmf_options *options, bool counting,
 	else if (!aligned(memory))
 		status = VMF_INVALID_ARGUMENT;
 	if (status != VMF_OK) {
+		destroy_normalized_set(&config.resolved, &config.allocator);
 		if (memory)
 			config.allocator.deallocate(
 				config.allocator.user, memory);
@@ -215,6 +237,8 @@ void vmf_decoder_destroy(vmf_decoder *decoder)
 		return;
 	vmf_allocator allocator = decoder->config.allocator;
 
+	destroy_normalized_set(&decoder->config.resolved, &allocator);
+
 	if (decoder->storage)
 		allocator.deallocate(allocator.user, decoder->storage);
 	allocator.deallocate(allocator.user, decoder);
@@ -225,6 +249,8 @@ void vmf_encoder_destroy(vmf_encoder *encoder)
 	if (!encoder)
 		return;
 	vmf_allocator allocator = encoder->config.allocator;
+
+	destroy_normalized_set(&encoder->config.resolved, &allocator);
 
 	if (encoder->storage)
 		allocator.deallocate(allocator.user, encoder->storage);

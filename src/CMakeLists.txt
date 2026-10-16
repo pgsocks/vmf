@@ -1,6 +1,7 @@
 add_library(vmf STATIC
 	describe.cpp allocation.cpp schema.cpp envelope.cpp bits.cpp
-	traversal.cpp adapters.cpp payload.cpp
+	traversal.cpp adapters.cpp payload.cpp payload_bridge.cpp
+	runtime_schema.cpp
 )
 add_library(vmf::vmf ALIAS vmf)
 target_include_directories(vmf PUBLIC

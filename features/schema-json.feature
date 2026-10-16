@@ -9,11 +9,17 @@ Feature: Native payload schemas loaded from JSON
     Then the JSON schema produces the handwritten schema's events and bytes
 
     Examples:
-      | payload    |
-      | scalar     |
-      | recurrence |
-      | choice     |
-      | UTF-8 text |
+      | payload           |
+      | scalar            |
+      | recurrence        |
+      | presence          |
+      | absence           |
+      | field-count       |
+      | group recurrence  |
+      | group absence     |
+      | nested recurrence |
+      | UTF-8 text        |
+      | literal text      |
 
   Scenario: Loading a schema set is atomic
     Given a JSON schema set with a valid entry followed by an invalid entry

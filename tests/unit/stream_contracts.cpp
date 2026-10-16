@@ -8,20 +8,26 @@ namespace
 {
 
 struct stream_schema {
-	vmf_node root = {};
-	vmf_node field = {};
+	uint32_t part = 1;
+	vmf_index_schema field = {};
+	vmf_index_schema recurring[2] = {};
+	uint32_t recurring_parts[2] = {1, 2};
+	vmf_repeat_component controller = {1, {true, 5}};
+	vmf_repeat_component member = {1, {}};
 	vmf_message_schema schema = {};
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set set = {&entry, 1};
+	vmf_schema_set set = {};
 };
 
-void initialize(stream_schema *s, uint8_t umf = 1)
+void initialize(stream_schema *s, uint8_t = 1)
 {
-	fixtures::scalar(&s->field, 2, 8);
-	fixtures::group(&s->root, 1, &s->field, 1);
-	s->schema.root = &s->root;
-	s->schema.id.user_message_format = umf;
-	s->schema.octet_order = VMF_BIT_LSB_FIRST;
+	s->field.index_number = {&s->part, 1};
+	s->field.number_of_bits = 8;
+	s->schema.message_number = {1, 1};
+	s->schema.indexes = &s->field;
+	s->schema.index_count = 1;
+	s->set = {VMF_ENVELOPE_D1, &s->schema, 1, {}};
+	s->set.standard.kind = VMF_STANDARD_RAW_CODE;
+	s->set.standard.as.raw_code = 0;
 }
 
 vmf_status finish(vmf_decoder *reader, vmf_input *input,
@@ -32,7 +38,7 @@ vmf_status finish(vmf_decoder *reader, vmf_input *input,
 		vmf_status status = vmf_decoder_next(reader, input, &event);
 
 		if (status != VMF_OK) {
-			EXPECT_EQ(nullptr, event.node);
+			EXPECT_EQ(nullptr, event.index);
 			return status;
 		}
 		if (kinds)
@@ -51,10 +57,12 @@ TEST(Streaming, EverySplitPreservesSizedConcatenatedPdus)
 	vmf_decoder *reader = nullptr;
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
-	std::vector<uint8_t> bytes(vector_d1, vector_d1 + sizeof(vector_d1));
+	std::vector<uint8_t> bytes(vector_vmf_d1,
+		vector_vmf_d1 + sizeof(vector_vmf_d1));
 
-	bytes.insert(bytes.end(), vector_d1, vector_d1 + sizeof(vector_d1));
-	for (size_t split = 0; split <= sizeof(vector_d1); ++split) {
+	bytes.insert(bytes.end(), vector_vmf_d1,
+		vector_vmf_d1 + sizeof(vector_vmf_d1));
+	for (size_t split = 0; split <= sizeof(vector_vmf_d1); ++split) {
 		SCOPED_TRACE(split);
 		vmf_decoder_reset(reader);
 		ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
@@ -63,7 +71,7 @@ TEST(Streaming, EverySplitPreservesSizedConcatenatedPdus)
 		vmf_status status = finish(reader, &first, &kinds);
 
 		EXPECT_EQ(split, first.used);
-		if (split < sizeof(vector_d1))
+		if (split < sizeof(vector_vmf_d1))
 			EXPECT_EQ(VMF_NEED_INPUT, status);
 		else
 			EXPECT_EQ(VMF_DONE, status);
@@ -71,7 +79,7 @@ TEST(Streaming, EverySplitPreservesSizedConcatenatedPdus)
 			bytes.data() + split, bytes.size() - split, 0, true};
 
 		EXPECT_EQ(VMF_DONE, finish(reader, &rest, &kinds));
-		EXPECT_EQ(sizeof(vector_d1) - split, rest.used);
+		EXPECT_EQ(sizeof(vector_vmf_d1) - split, rest.used);
 		EXPECT_EQ(
 			(std::vector<vmf_event_kind>{VMF_EVENT_ENVELOPE,
 				VMF_EVENT_MESSAGE_BEGIN, VMF_EVENT_GROUP_BEGIN,
@@ -95,10 +103,11 @@ TEST(Streaming, UnsizedFixedBodyWaitsForEmptyFinalAndRejectsExtraOctet)
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-	vmf_input input = {vector_missing, sizeof(vector_missing), 0, false};
+	vmf_input input = {vector_vmf_missing,
+		sizeof(vector_vmf_missing), 0, false};
 
 	EXPECT_EQ(VMF_NEED_INPUT, finish(reader, &input));
-	EXPECT_EQ(sizeof(vector_missing), input.used);
+	EXPECT_EQ(sizeof(vector_vmf_missing), input.used);
 	vmf_input final = {nullptr, 0, 0, true};
 
 	EXPECT_EQ(VMF_DONE, finish(reader, &final));
@@ -144,7 +153,7 @@ TEST(Streaming, CallbackPauseConsumesEventAndAbortRequiresReset)
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-	vmf_input input = {vector_d1, sizeof(vector_d1), 0, true};
+	vmf_input input = {vector_vmf_d1, sizeof(vector_vmf_d1), 0, true};
 	callback_log log = {VMF_EVENT_FIELD, VMF_EVENT_PAUSE, 0};
 	size_t delivered = 999;
 
@@ -167,8 +176,8 @@ TEST(Streaming, CallbackPauseConsumesEventAndAbortRequiresReset)
 	EXPECT_EQ(VMF_ABORTED, finish(reader, &input));
 	vmf_error error = vmf_decoder_error(reader);
 
-	EXPECT_EQ(112u, error.offset);
-	EXPECT_EQ(2u, error.node_id);
+	EXPECT_EQ(sizeof(vector_vmf_d1) * 8, error.offset);
+	EXPECT_EQ(0u, error.index_position);
 	EXPECT_EQ(0u, error.message_index);
 	vmf_decoder_reset(reader);
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
@@ -190,7 +199,8 @@ TEST(Streaming, EventBudgetIncludesMessageBoundaries)
 		ASSERT_EQ(
 			VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
 		ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-		vmf_input input = {vector_d1, sizeof(vector_d1), 0, true};
+		vmf_input input = {vector_vmf_d1,
+			sizeof(vector_vmf_d1), 0, true};
 
 		EXPECT_EQ(limit == 5 ? VMF_DONE : VMF_LIMIT_EXCEEDED,
 			finish(reader, &input));
@@ -208,7 +218,7 @@ TEST(Streaming, FailedBeginPreservesDecodedHeaderAndNextEvent)
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-	vmf_input input = {vector_d1, sizeof(vector_d1), 0, true};
+	vmf_input input = {vector_vmf_d1, sizeof(vector_vmf_d1), 0, true};
 	vmf_event event = {};
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_next(reader, &input, &event));
@@ -231,14 +241,8 @@ TEST(Streaming, FieldAdapterRetriesOriginalOffsetAfterPartialProgress)
 	stream_schema s;
 
 	initialize(&s);
-	s.field.as.field = {};
-	s.field.as.field.kind = VMF_FIELD_OCTETS;
-	auto *octets = &s.field.as.field.as.octets;
-
-	octets->order = VMF_BIT_LSB_FIRST;
-	octets->length.kind = VMF_EXTENT_FIXED;
-	octets->length.fixed = octets->length.minimum = octets->length.maximum =
-		9;
+	s.field.encode_type = VMF_ENCODE_OCTETS;
+	s.field.number_of_bits = 72;
 	std::vector<uint8_t> body = {0, 1, 2, 3, 4, 5, 6, 7, 8};
 	auto bytes = fixtures::packet(VMF_ENVELOPE_D1, body);
 	auto options = fixtures::options(VMF_ENVELOPE_D1, &s.set);
@@ -297,33 +301,95 @@ TEST(Streaming, FieldAdapterRetriesOriginalOffsetAfterPartialProgress)
 	vmf_decoder_destroy(reader);
 }
 
+TEST(Streaming, FieldAdapterRequiresAnActiveBody)
+{
+	stream_schema s;
+
+	initialize(&s);
+	auto options = fixtures::options(VMF_ENVELOPE_D1, &s.set);
+	vmf_encoder *writer = nullptr;
+	vmf_unsigned_field value = {1};
+	uint8_t byte;
+	vmf_output output = {&byte, 1, 0};
+
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_create(&options, false, &writer, nullptr));
+	EXPECT_EQ(VMF_INVALID_STATE, vmf_encoder_write_field(writer,
+		&output, &s.field, &value, sizeof(value), 1));
+	EXPECT_EQ(0u, output.used);
+	vmf_encoder_destroy(writer);
+}
+
+TEST(Streaming, RuntimeErrorsIdentifyTheCanonicalRegistryLocation)
+{
+	stream_schema s;
+
+	initialize(&s);
+	vmf_index_refinements constraints = {};
+
+	constraints.constant = {true, 0};
+	s.field.refinements = &constraints;
+	vmf_message_schema messages[] = {s.schema, s.schema};
+
+	messages[0].message_number.number = 2;
+	s.set.messages = messages;
+	s.set.message_count = 2;
+	auto options = vmf_options_for_schemas(&s.set);
+	vmf_decoder *reader = nullptr;
+	vmf_encoder *writer = nullptr;
+
+	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_create(&options, true, &writer, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
+	vmf_input input = {vector_vmf_d1, sizeof(vector_vmf_d1), 0, true};
+	vmf_event event = {};
+
+	for (unsigned i = 0; i < 3; ++i) {
+		ASSERT_EQ(VMF_OK, vmf_decoder_next(reader, &input, &event));
+		ASSERT_EQ(VMF_OK, vmf_encoder_write(writer, nullptr, &event));
+	}
+	EXPECT_EQ(VMF_OUT_OF_RANGE,
+		vmf_decoder_next(reader, &input, &event));
+	event = {};
+	event.kind = VMF_EVENT_FIELD;
+	event.index = &s.field;
+	event.field_kind = VMF_FIELD_UNSIGNED;
+	event.depth = 1;
+	event.as.field.total_units = 1;
+	event.as.field.value.unsigned_integer.value = 0x5a;
+	EXPECT_EQ(VMF_OUT_OF_RANGE,
+		vmf_encoder_write(writer, nullptr, &event));
+	for (vmf_error error : {vmf_decoder_error(reader),
+		vmf_encoder_error(writer)}) {
+		EXPECT_EQ(1u, error.schema_index);
+		EXPECT_EQ(0u, error.index_position);
+		EXPECT_EQ(0u, error.message_index);
+		EXPECT_EQ(VMF_PROPERTY_ENCODING, error.property);
+	}
+	vmf_encoder_destroy(writer);
+	vmf_decoder_destroy(reader);
+}
+
 static void check_known_recurrence(
-	bool counting, bool more_bit, uint64_t count, int metadata)
+	bool counting, uint64_t count, int metadata)
 {
 	SCOPED_TRACE(counting);
-	SCOPED_TRACE(more_bit);
 	SCOPED_TRACE(count);
 	SCOPED_TRACE(metadata);
 	stream_schema s;
 
 	initialize(&s);
-	vmf_node value = {}, body = {};
-
-	fixtures::scalar(&value, 4, 4);
-	fixtures::group(&body, 3, &value, 1);
-	s.field = {};
-	s.field.id = 2;
-	s.field.kind = VMF_NODE_REPEAT;
-	s.field.as.repeat.body = &body;
-	auto *extent = &s.field.as.repeat.count;
-
-	extent->kind = VMF_EXTENT_RECURRENCE_BEFORE;
-	extent->more_bit = more_bit;
-	extent->minimum = 1;
-	extent->maximum = 5;
+	for (size_t i = 0; i < 2; ++i)
+		s.recurring[i].index_number = {&s.recurring_parts[i], 1};
+	s.recurring[0].indicator = VMF_INDICATOR_FRI;
+	s.recurring[0].repeat_code = {&s.controller, 1};
+	s.recurring[1].number_of_bits = 4;
+	s.recurring[1].repeat_code = {&s.member, 1};
+	s.schema.indexes = s.recurring;
+	s.schema.index_count = 2;
 	std::vector<uint8_t> payload = count == 1
-		? std::vector<uint8_t>{(uint8_t)(more_bit ? 6 : 7)}
-		: std::vector<uint8_t>{(uint8_t)(more_bit ? 7 : 0x26), 3};
+		? std::vector<uint8_t>{6} : std::vector<uint8_t>{7, 3};
 	auto bytes = fixtures::packet(VMF_ENVELOPE_D1, payload);
 	auto options = fixtures::options(VMF_ENVELOPE_D1, &s.set);
 	vmf_decoder *reader = nullptr;
@@ -345,10 +411,10 @@ static void check_known_recurrence(
 			break;
 		ASSERT_EQ(VMF_OK, status);
 		if (event.kind == VMF_EVENT_GROUP_BEGIN &&
-			event.node == &s.field)
+			event.scope.kind == VMF_SCOPE_REPEAT)
 			event.as.group.count = count;
 		bool occurrence = event.kind == VMF_EVENT_GROUP_BEGIN &&
-			event.node == &body;
+			event.scope.kind == VMF_SCOPE_REPEAT_BODY;
 		bool conflict = metadata == 2 ? event.occurrence == 0
 			: metadata == 3 && event.occurrence == count - 1;
 
@@ -388,11 +454,10 @@ static void check_known_recurrence(
 TEST(Streaming, KnownRecurrenceCountsDeriveAndValidateContinuationFlags)
 {
 	for (bool counting : {false, true})
-		for (bool more_bit : {false, true})
 			for (uint64_t count : {1u, 2u})
 				for (int metadata = 0; metadata < 4; ++metadata)
-					check_known_recurrence(counting, more_bit,
-						count, metadata);
+					check_known_recurrence(
+						counting, count, metadata);
 }
 
 TEST(Streaming, StandardBodyBoundStillAppliesWhenCallerRaisesLimits)
@@ -410,13 +475,18 @@ TEST(Streaming, StandardBodyBoundStillAppliesWhenCallerRaisesLimits)
 	ASSERT_EQ(VMF_OK,
 		vmf_encoder_create(&options, true, &writer, nullptr));
 	ASSERT_EQ(VMF_OK, vmf_decoder_begin_envelope(reader));
-	vmf_input input = {vector_missing, sizeof(vector_missing), 0, true};
+	vmf_input input = {vector_vmf_missing,
+		sizeof(vector_vmf_missing), 0, true};
 	vmf_event event = {};
 
 	ASSERT_EQ(VMF_OK, vmf_decoder_next(reader, &input, &event));
 	ASSERT_EQ(VMF_OK, vmf_encoder_write(writer, nullptr, &event));
+	vmf_message_id id = static_cast<const vmf_header_d1 *>(
+		event.as.envelope.header)->fields.messages[0].id;
+
 	event = {};
 	event.kind = VMF_EVENT_MESSAGE_BEGIN;
+	event.as.message.id = id;
 	event.as.message.payload_octets = 1048576;
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED,
 		vmf_encoder_write(writer, nullptr, &event));

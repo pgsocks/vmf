@@ -2,6 +2,7 @@
 #include <cucumber-cpp/autodetect.hpp>
 #include <vmf/wire.h>
 #include "vectors.h"
+#include "../unit/fixtures.hpp"
 #include <string>
 #include <vector>
 
@@ -9,16 +10,16 @@ namespace
 {
 
 struct payload_context {
-	vmf_node root = {};
-	vmf_node children[3] = {};
-	vmf_node body = {};
-	vmf_node value = {};
+	uint32_t parts[3] = {1, 2, 3};
+	vmf_index_schema indexes[3] = {};
+	vmf_index_refinements refinements[3] = {};
+	vmf_repeat_component controller = {1, {true, 5}};
+	vmf_repeat_component member = {1, {}};
 	vmf_code_range range = {2, 2};
-	vmf_choice_case arm = {};
 	vmf_condition_term term = {};
+	vmf_condition condition = {};
 	vmf_message_schema schema = {};
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set schemas = {&entry, 1};
+	vmf_schema_set schemas = {};
 	vmf_decoder *reader = nullptr;
 	vmf_encoder *writer = nullptr;
 	std::vector<uint8_t> wire;
@@ -31,7 +32,8 @@ struct payload_context {
 	vmf_status encoder_status = VMF_OK;
 	std::string example;
 	bool known_count = false;
-	std::vector<vmf_node> lookup_nodes;
+	std::vector<vmf_index_schema> lookup_indexes;
+	std::vector<uint32_t> lookup_parts;
 
 	~payload_context()
 	{
@@ -40,35 +42,28 @@ struct payload_context {
 	}
 };
 
-static vmf_node unsigned_node(vmf_node_id id, uint8_t width)
+static void initialize(payload_context *c, size_t count)
 {
-	vmf_node result = {};
-
-	result.id = id;
-	result.kind = VMF_NODE_FIELD;
-	result.as.field.kind = VMF_FIELD_UNSIGNED;
-	result.as.field.as.scalar.encoding = {
-		width, VMF_BIT_LSB_FIRST, VMF_INTEGER_UNSIGNED};
-	return result;
-}
-
-static void attach_payload(
-	payload_context *context, std::initializer_list<uint8_t> body)
-{
-	context->wire.assign(vector_d1, vector_d1 + sizeof(vector_d1) - 1);
-	/* D1 Table I MessageSize occupies bits 53..72 in this header. */
-	for (unsigned int bit = 0; bit < 20; ++bit) {
-		size_t offset = 53 + bit;
-		uint8_t mask = 1u << (offset % 8);
-
-		context->wire[offset / 8] &= ~mask;
-		if ((body.size() >> bit) & 1)
-			context->wire[offset / 8] |= mask;
+	c->schema.message_number = {1, 1};
+	c->schema.indexes = c->indexes;
+	c->schema.index_count = count;
+	c->schemas = {VMF_ENVELOPE_D1, &c->schema, 1, {}};
+	c->schemas.standard.kind = VMF_STANDARD_RAW_CODE;
+	c->schemas.standard.as.raw_code = 0;
+	for (size_t i = 0; i < count; ++i) {
+		c->indexes[i].index_number = {&c->parts[i], 1};
+		c->indexes[i].number_of_bits = 8;
 	}
-	context->wire.insert(context->wire.end(), body);
 }
 
-GIVEN("^a synthetic (leading recurrence|conditional choice|UTF-8 text) "
+static void attach_payload(payload_context *c,
+	std::initializer_list<uint8_t> body)
+{
+	c->wire = fixtures::packet(VMF_ENVELOPE_D1,
+		std::vector<uint8_t>(body));
+}
+
+GIVEN("^a synthetic (leading recurrence|conditional fields|UTF-8 text) "
 	"body in a D1 envelope$")
 {
 	REGEX_PARAM(std::string, example);
@@ -76,90 +71,51 @@ GIVEN("^a synthetic (leading recurrence|conditional choice|UTF-8 text) "
 	auto *c = context.get();
 
 	c->example = example;
-	c->root.id = 100;
-	c->root.kind = VMF_NODE_GROUP;
-	c->root.as.group = {c->children, 1};
-	c->schema.id.user_message_format = 1;
-	c->schema.root = &c->root;
-	c->schema.octet_order = VMF_BIT_LSB_FIRST;
+	initialize(c, example == "conditional fields" ? 3 :
+		example == "leading recurrence" ? 2 : 1);
 	if (example == "leading recurrence") {
-		c->value = unsigned_node(3, 4);
-		c->body.id = 2;
-		c->body.kind = VMF_NODE_GROUP;
-		c->body.as.group = {&c->value, 1};
-		c->children[0].id = 1;
-		c->children[0].kind = VMF_NODE_REPEAT;
-		c->children[0].as.repeat.body = &c->body;
-		auto *extent = &c->children[0].as.repeat.count;
-
-		extent->kind = VMF_EXTENT_RECURRENCE_BEFORE;
-		extent->more_bit = true;
-		extent->minimum = 1;
-		extent->maximum = 5;
+		c->indexes[0].number_of_bits = 0;
+		c->indexes[0].indicator = VMF_INDICATOR_FRI;
+		c->indexes[0].repeat_code = {&c->controller, 1};
+		c->indexes[1].number_of_bits = 4;
+		c->indexes[1].repeat_code = {&c->member, 1};
 		attach_payload(c, {0x07, 0x03});
-	} else if (example == "conditional choice") {
-		c->root.as.group.child_count = 3;
-		c->children[0] = unsigned_node(1, 2);
-		c->value.id = 4;
-		c->value.kind = VMF_NODE_FIELD;
-		c->value.as.field.kind = VMF_FIELD_OCTETS;
-		c->value.as.field.as.octets.order = VMF_BIT_LSB_FIRST;
-		auto *extent = &c->value.as.field.as.octets.length;
-
-		extent->kind = VMF_EXTENT_PREFIX;
-		extent->prefix = {3, VMF_BIT_LSB_FIRST, VMF_INTEGER_UNSIGNED};
-		extent->bias = 1;
-		extent->maximum = 7;
-		c->arm = {&c->range, 1, &c->value};
-		c->children[1].id = 2;
-		c->children[1].kind = VMF_NODE_CHOICE;
-		c->children[1].as.choice = {1, 3, &c->arm, 1, nullptr};
-		c->children[2] = unsigned_node(3, 1);
-		c->term = {1, UINT64_MAX, &c->range, 1, false};
-		c->children[2].presence.kind = VMF_PRESENCE_CONDITION;
-		c->children[2].presence.condition = {
-			VMF_CONDITION_ALL, &c->term, 1, false};
-		attach_payload(c, {0x06, 0x30, 0x20});
+	} else if (example == "conditional fields") {
+		c->indexes[0].number_of_bits = 2;
+		c->indexes[1].encode_type = VMF_ENCODE_OCTETS;
+		c->indexes[1].number_of_bits = 56;
+		c->indexes[1].refinements = &c->refinements[1];
+		c->refinements[1].length_from = c->indexes[0].index_number;
+		c->indexes[2].number_of_bits = 1;
+		c->indexes[2].refinements = &c->refinements[2];
+		c->term.field = c->indexes[0].index_number;
+		c->term.values = &c->range;
+		c->term.value_count = 1;
+		c->condition = {VMF_CONDITION_ALL, &c->term, 1, false};
+		c->refinements[2].when = &c->condition;
+		/* Count 2, octets 80/01, conditional one-bit value 1. */
+		attach_payload(c, {0x02, 0x06, 0x04});
 	} else {
-		c->children[0].id = 1;
-		c->children[0].kind = VMF_NODE_FIELD;
-		c->children[0].as.field.kind = VMF_FIELD_TEXT;
-		auto *text = &c->children[0].as.field.as.text;
-
-		text->encoding = VMF_TEXT_UTF_8;
-		text->order = VMF_BIT_LSB_FIRST;
-		text->length.fixed = 8;
-		text->length.minimum = text->length.maximum = 8;
-		attach_payload(
-			c, {0x41, 0xe2, 0x82, 0xac, 0xf0, 0x90, 0x8d, 0x88});
+		c->indexes[0].encode_type = VMF_ENCODE_TEXT;
+		c->indexes[0].number_of_bits = 64;
+		c->indexes[0].refinements = &c->refinements[0];
+		c->refinements[0].text_encoding = VMF_TEXT_UTF_8;
+		attach_payload(c,
+			{0x41, 0xe2, 0x82, 0xac, 0xf0, 0x90, 0x8d, 0x88});
 	}
 }
 
-GIVEN("^a payload schema with a dependency between alternative choice arms$")
+GIVEN("^a payload schema with a dependency on a future field$")
 {
-	cucumber::ScenarioScope<payload_context> context;
-	auto *c = context.get();
+	cucumber::ScenarioScope<payload_context> c;
 
-	c->root.id = 100;
-	c->root.kind = VMF_NODE_GROUP;
-	c->root.as.group = {c->children, 2};
-	c->schema.root = &c->root;
-	c->schema.octet_order = VMF_BIT_LSB_FIRST;
-	c->children[0] = unsigned_node(1, 8);
-	c->value = unsigned_node(3, 8);
-	c->children[2] = unsigned_node(5, 8);
-	c->term = {3, UINT64_MAX, &c->range, 1, false};
-	c->children[2].presence.kind = VMF_PRESENCE_CONDITION;
-	c->children[2].presence.condition = {
-		VMF_CONDITION_ALL, &c->term, 1, false};
-	c->body.id = 4;
-	c->body.kind = VMF_NODE_GROUP;
-	c->body.as.group = {&c->children[2], 1};
-	c->arm = {&c->range, 1, &c->value};
-	c->children[1].id = 2;
-	c->children[1].kind = VMF_NODE_CHOICE;
-	c->children[1].as.choice = {
-		1, UINT64_MAX, &c->arm, 1, &c->body};
+	initialize(c.get(), 2);
+	c->term.field = c->indexes[1].index_number;
+	c->term.values = &c->range;
+	c->term.value_count = 1;
+	c->condition = {VMF_CONDITION_ALL, &c->term, 1, false};
+	c->refinements[0].when = &c->condition;
+	c->indexes[0].refinements = &c->refinements[0];
 }
 
 WHEN("^I try to create codecs for that payload schema$")
@@ -192,36 +148,37 @@ GIVEN("^the recurrence count is known before replay$")
 	c->known_count = true;
 }
 
-GIVEN("^a valid payload schema with 4096 nested nodes$")
+GIVEN("^a valid payload schema with 4096 indexes$")
 {
 	cucumber::ScenarioScope<payload_context> c;
 
-	c->lookup_nodes.resize(4096);
-	for (size_t i = 0; i < c->lookup_nodes.size(); ++i) {
-		auto *node = &c->lookup_nodes[i];
-
-		*node = unsigned_node((vmf_node_id)i + 1, 8);
-		if (i + 1 < c->lookup_nodes.size()) {
-			node->kind = VMF_NODE_GROUP;
-			node->as.group = {node + 1, 1};
-		}
+	initialize(c.get(), 0);
+	c->lookup_indexes.resize(4096);
+	c->lookup_parts.resize(4096);
+	for (size_t i = 0; i < c->lookup_indexes.size(); ++i) {
+		c->lookup_parts[i] = i + 1;
+		c->lookup_indexes[i].index_number = {&c->lookup_parts[i], 1};
+		c->lookup_indexes[i].number_of_bits = 8;
 	}
-	c->schema.root = c->lookup_nodes.data();
-	c->schema.octet_order = VMF_BIT_LSB_FIRST;
+	c->schema.indexes = c->lookup_indexes.data();
+	c->schema.index_count = c->lookup_indexes.size();
 	auto limits = vmf_default_limits();
 
-	limits.max_depth = c->lookup_nodes.size() - 1;
-	ASSERT_EQ(VMF_OK,
-		vmf_schema_validate(&c->schema, &limits, nullptr));
+	limits.max_schema_nodes = 4097;
+	ASSERT_EQ(VMF_OK, vmf_schema_set_validate(
+		&c->schemas, &limits, nullptr, nullptr));
 }
 
-THEN("^schema lookup returns the deepest original node "
-	"and rejects missing IDs$")
+THEN("^schema lookup returns the original last index "
+	"and rejects missing addresses$")
 {
 	cucumber::ScenarioScope<payload_context> c;
+	uint32_t address = 4096;
 
-	EXPECT_EQ(&c->lookup_nodes.back(), vmf_schema_find(&c->schema, 4096));
-	EXPECT_EQ(nullptr, vmf_schema_find(&c->schema, 4097));
+	EXPECT_EQ(&c->lookup_indexes.back(),
+		vmf_schema_find(&c->schema, {&address, 1}));
+	++address;
+	EXPECT_EQ(nullptr, vmf_schema_find(&c->schema, {&address, 1}));
 }
 
 static vmf_status replay_payload_event(
@@ -273,22 +230,22 @@ WHEN("^I decode and replay its payload with single-octet buffers$")
 			break;
 		ASSERT_EQ(VMF_OK, c->status);
 		if (event.kind == VMF_EVENT_GROUP_BEGIN &&
-			event.node == &c->body) {
+			event.scope.kind == VMF_SCOPE_REPEAT_BODY) {
 			EXPECT_TRUE(event.as.group.more_present);
 			c->more.push_back(event.as.group.more);
 		}
 		if (event.kind == VMF_EVENT_FIELD) {
-			if (event.node->as.field.kind == VMF_FIELD_UNSIGNED)
+			if (event.field_kind == VMF_FIELD_UNSIGNED)
 				c->numbers.push_back(event.as.field.value
 						.unsigned_integer.value);
-			if (event.node->as.field.kind == VMF_FIELD_TEXT) {
+			if (event.field_kind == VMF_FIELD_TEXT) {
 				c->texts.emplace_back(
 					event.as.field.value.text.data,
 					event.as.field.value.text.size);
 				c->offsets.push_back(
 					event.as.field.offset_units);
 			}
-			if (event.node->as.field.kind == VMF_FIELD_OCTETS)
+			if (event.field_kind == VMF_FIELD_OCTETS)
 				c->texts.emplace_back(
 					reinterpret_cast<const char *>(
 						event.as.field.value.octets
@@ -296,9 +253,9 @@ WHEN("^I decode and replay its payload with single-octet buffers$")
 					event.as.field.value.octets.size);
 		}
 		if (c->known_count && event.kind == VMF_EVENT_GROUP_BEGIN) {
-			if (event.node == &c->children[0])
+			if (event.scope.kind == VMF_SCOPE_REPEAT)
 				event.as.group.count = 2;
-			if (event.node == &c->body)
+			if (event.scope.kind == VMF_SCOPE_REPEAT_BODY)
 				event.as.group.more_present = false;
 		}
 		ASSERT_EQ(VMF_OK, replay_payload_event(c, &event));
@@ -314,7 +271,7 @@ THEN("^the recurrence body flags and values are preserved$")
 	EXPECT_EQ((std::vector<uint64_t>{3, 12}), c->numbers);
 }
 
-THEN("^the choice bytes and conditional value are preserved$")
+THEN("^the field-length bytes and conditional value are preserved$")
 {
 	cucumber::ScenarioScope<payload_context> c;
 

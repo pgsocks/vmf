@@ -122,7 +122,7 @@ static void check_example(bool d1, uint8_t second, char expected)
 		if (event.kind == VMF_EVENT_ABSENT)
 			++absent;
 		if (event.kind == VMF_EVENT_FIELD) {
-			if (event.node->as.field.kind == VMF_FIELD_TEXT) {
+			if (event.field_kind == VMF_FIELD_TEXT) {
 				auto text = event.as.field.value.text;
 
 				characters.append(text.data, text.size);

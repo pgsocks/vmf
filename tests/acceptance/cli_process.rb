@@ -108,33 +108,61 @@ def failure(result, status = nil)
 	error
 end
 
-def schema(identity = 1)
-	{
-		'schemas' => [{
-			'id' => {'user_message_format' => identity},
-			'octet_order' => 'lsb_first',
-			'root' => {
-				'id' => 1, 'kind' => 'group',
-				'group' => {'children' => [{
-					'id' => 2, 'name' => 'value', 'kind' => 'field',
-					'field' => {'kind' => 'unsigned', 'scalar' => {
-						'encoding' => {'bit_width' => 8,
-							'order' => 'lsb_first',
-							'representation' => 'unsigned'}
-					}}
-				}]}
-			}
+def schema(number = 1, profile = 'D1')
+	definition = {
+		'format' => 'vmf-schema/1', 'envelope' => profile,
+		'messages' => [{
+			'message_number' => "K01.#{number}",
+			'indexes' => [{'index_number' => '1.', 'number_of_bits' => 8}]
 		}]
 	}
+	definition['standard_version'] = 0 unless profile == 'B'
+	definition
 end
 
-VECTORS = {
-	'B' => '0142fc7f0000e0005a',
-	'C' => '02170004f1ff01008003005a',
-	'D' => '031b008020fe3f0000000000005a',
-	'D1' => '041b008020fe3f0000000000005a'
-}.transform_values { |hex| [hex].pack('H*') }
-UNSIZED = ['0400000000005a'].pack('H*')
+# Independent minimal envelope construction in the documented logical order.
+# The synthetic VMF selector and one-octet body assert no assigned layout.
+def packet(profile, sized: true)
+	bits = []
+	emit = lambda do |value, width = 1|
+		width.times { |i| bits << ((value >> i) & 1) }
+	end
+	d = %w[D D1].include?(profile)
+	b = profile == 'B'
+	emit.call({'B' => 1, 'C' => 2, 'D' => 3, 'D1' => 4}.fetch(profile), 4)
+	4.times { emit.call(0) } # Compression, originator, recipients, information.
+	emit.call(0) unless b # HeaderSize absent.
+	5.times { emit.call(0) } if d # Future groups 1..5.
+	emit.call(0) # Last handling descriptor.
+	emit.call(2, 4) # VMF UMF.
+	unless b
+		emit.call(1)
+		emit.call(0, 4) # Explicit raw message-standard zero.
+	end
+	emit.call(1) # Identification present.
+	emit.call(1, 4) # FAD.
+	emit.call(1, 7) # Message number.
+	emit.call(0) # Subtype absent.
+	emit.call(0) # Filename absent.
+	emit.call(sized ? 1 : 0)
+	emit.call(1, 20) if sized
+	emit.call(0, 2) # Operation.
+	emit.call(0) # Retransmit.
+	emit.call(d ? 0 : 2, 3) # Precedence.
+	emit.call(0, 2) # Classification.
+	6.times { emit.call(0) } # Marking, DTGs, requests, response, references.
+	5.times { emit.call(0) } if d # Future groups 6..10.
+	emit.call(0) unless b # Security absent.
+	5.times { emit.call(0) } if d # Future groups 11..15.
+	bits << 0 until (bits.size % 8).zero?
+	header = bits.each_slice(8).map do |octet|
+		octet.each_with_index.sum { |bit, i| bit << i }
+	end.pack('C*')
+	header + "\x5a".b
+end
+
+VECTORS = %w[B C D D1].to_h { |profile| [profile, packet(profile)] }
+UNSIZED = packet('D1', sized: false)
 
 begin
 Dir.mktmpdir('vmf-cli-') do |directory|
@@ -191,6 +219,7 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 		check(error.include?('WIRE'), 'Repeated -v must accumulate.')
 	when 'profiles'
 		VECTORS.each do |profile, wire|
+			File.write(schema_path, JSON.generate(schema(1, profile)))
 			arguments = ['--profile', profile, '--schema', schema_path,
 				'--forward']
 			output, = success(run(arguments, wire))
@@ -221,14 +250,15 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 	when 'record-replay'
 		records = record.call(bytes * 2)
 		check(records.first == {'format' => 'vmf-events', 'version' => 1,
-			'profile' => 'D1'}, 'Unexpected archive prologue.')
+			'profile' => 'D1', 'schemas' => records.first['schemas']},
+			'Unexpected archive prologue.')
 		check(records.count { |item| item['event'] == 'PDU_END' } == 2,
 			'Expected two complete recorded PDUs.')
 		field = records.find { |item| item['event'] == 'FIELD' }
 		check(field && field['value'] == {'kind' => 'unsigned',
 			'value' => '90'}, 'Record must contain editable scalar events.')
-		check(field['node_id'] == 2 && field['depth'] == 1,
-			'Record must retain node identity and nesting.')
+		check(field['index_number'] == [1] && field['depth'] == 1,
+			'Record must retain canonical index identity and nesting.')
 		output, = success(run(replay))
 		check(output == bytes * 2, 'Replay must be byte identical.')
 		output, = success(run(['replay', '-', '--schema', schema_path],
@@ -247,7 +277,7 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 	when 'strict-sizes'
 		records = record.call
 		envelope = records.find { |item| item['event'] == 'ENVELOPE' }
-		envelope['header_octets'] = '12'
+		envelope['header_octets'] = '999'
 		write_records.call(records)
 		failure(run(replay))
 		records = record.call
@@ -257,7 +287,7 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 		failure(run(replay))
 		records = record.call(bytes * 2)
 		envelopes = records.select { |item| item['event'] == 'ENVELOPE' }
-		envelopes[1]['header_octets'] = '12'
+		envelopes[1]['header_octets'] = '999'
 		write_records.call(records)
 		output, error, status = run(replay)
 		check(status && status != 0 && !error.empty?,
@@ -266,7 +296,11 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 			'Only complete earlier PDUs may be emitted before failure.')
 	when 'invalid-archive'
 		records = record.call
-		records[0]['version'] = 2
+		records[0]['version'] = 99
+		write_records.call(records)
+		failure(run(replay))
+		records = record.call
+		records[0]['schemas'] = []
 		write_records.call(records)
 		failure(run(replay))
 		records = record.call
@@ -299,25 +333,40 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 		oversized = UNSIZED.byteslice(0, UNSIZED.bytesize - 1) +
 			("\x00" * 1_048_576)
 		failure(run(['--profile', 'D1', '--headers-only'], oversized))
+		shortened = ['ef00000015000000'].pack('H*')
+		success(run(['--profile', 'D1', '--record', archive], shortened))
+		output, = success(run(['replay', archive]))
+		check(output == shortened,
+			'No-schema recordings must replay shortened envelopes.')
 	when 'schemas'
 		other = File.join(directory, 'other.json')
-		File.write(other, JSON.generate(schema(0)))
+		File.write(other, JSON.generate(schema(2)))
 		output, = success(run(base + ['--schema', other, '--forward'], bytes))
 		check(output == bytes, 'Multiple schema files must combine.')
+		record.call
+		output, = success(run(replay + ['--schema', other]))
+		check(output == bytes, 'Unrelated replay schemas must be allowed.')
+		changed = schema
+		changed['messages'][0]['indexes'][0]['number_of_bits'] = 7
+		File.write(schema_path, JSON.generate(changed))
+		failure(run(replay))
+		File.write(schema_path, JSON.generate(schema))
 		failure(run(base + ['--schema', schema_path], bytes))
 		failure(run(['--profile', 'D1', '--schema', other], bytes))
+		File.write(other, JSON.generate(schema(2, 'C')))
+		failure(run(base + ['--schema', other], bytes))
+		failure(run(['--profile', 'C', '--schema', schema_path], bytes))
 		File.write(other, '{broken')
 		failure(run(base + ['--schema', other], bytes))
 		failure(run(base + ['--schema', directory]))
 	when 'unsized'
-		File.write(schema_path, JSON.generate(schema(0)))
 		output, = success(run(base + ['--forward'], UNSIZED))
 		check(output == UNSIZED, 'EOF-delimited PDU must be forwarded.')
 		unsized_records = record.call(UNSIZED)
 		output, = success(run(replay))
 		check(output == UNSIZED, 'EOF-delimited PDU must replay identically.')
 		combined = schema
-		combined['schemas'].concat(schema(0)['schemas'])
+		combined['messages'].concat(schema(2)['messages'])
 		File.write(schema_path, JSON.generate(combined))
 		sized_records = record.call
 		envelope = unsized_records.find { |item| item['event'] == 'ENVELOPE' }

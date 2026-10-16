@@ -20,10 +20,10 @@ extern "C" {
  * Streaming codec for the profiles and schema features documented below.
  * See docs/format.md for supported scope and revision-specific wire rules.
  *
- * A vmf_message_schema IS the schema. Define it and its vmf_node tree using
- * ordinary C initializers or application code. Give a set of these schemas
- * to the codec. There is no schema parser, compiler, builder object, generated
- * source requirement, or second opaque schema representation in this API.
+ * Define ordered message indexes with ordinary C initializers or application
+ * code and give their profile-bound registry to the codec. Construction
+ * resolves defaults and private traversal storage. No builder or generated
+ * source is required.
  *
  * The decoder identifies each message from its envelope metadata, selects a
  * schema, and returns events containing decoded values. The encoder accepts
@@ -31,7 +31,7 @@ extern "C" {
  * Neither direction constructs a whole payload object or performs transport
  * I/O.
  *
- * Schemas, names, arrays and schema sets are borrowed, immutable and shareable.
+ * Schemas, keys, arrays and schema sets are borrowed and immutable.
  * They must remain at stable addresses throughout every codec using them.
  * Handles own bounded storage; schemas and I/O buffers belong to the caller.
  * Mutable codecs are single-threaded and must not be reentered from callbacks.
@@ -103,7 +103,7 @@ typedef struct vmf_output {
  */
 typedef struct vmf_limits {
 	size_t max_schemas;
-	size_t max_schema_nodes; /* Per schema; includes every choice arm. */
+	size_t max_schema_nodes; /* Per message, including normalized scopes. */
 	size_t max_depth;	 /* Root is depth 0. */
 	size_t max_header_items; /* Aggregate count of variable header items. */
 	size_t max_header_bytes; /* Header objects/data and encoder metadata
@@ -117,15 +117,33 @@ typedef struct vmf_limits {
 	uint64_t max_events_per_message;
 } vmf_limits;
 
-/* Optional error output. offset is a bit offset relative to the active PDU;
- * node_id is 0 when not applicable. Schema errors use offset 0. message_index
- * is zero-based; SIZE_MAX means no message is selected.
+/* Schema locations are source array positions, never generated IDs.
+ * SIZE_MAX means unavailable. offset counts PDU bits; message_index is the
+ * envelope descriptor position. Other positions address the native registry.
  */
+typedef enum vmf_schema_property {
+	VMF_PROPERTY_NONE,
+	VMF_PROPERTY_PROFILE,
+	VMF_PROPERTY_IDENTITY,
+	VMF_PROPERTY_INDEX,
+	VMF_PROPERTY_ENCODING,
+	VMF_PROPERTY_GROUP,
+	VMF_PROPERTY_REPEAT,
+	VMF_PROPERTY_INDICATOR,
+	VMF_PROPERTY_TARGET,
+	VMF_PROPERTY_DEPENDENCY,
+	VMF_PROPERTY_CONSTRAINT,
+	VMF_PROPERTY_KEY
+} vmf_schema_property;
 typedef struct vmf_error {
 	vmf_status status;
 	uint64_t offset;
-	uint32_t node_id;
+	size_t index_position;
 	size_t message_index;
+	size_t schema_index;
+	vmf_schema_property property;
+	size_t related_index_position;
+	uint32_t related_scope_id;
 } vmf_error;
 
 /* Return conservative explicit limits; neither function allocates. */
@@ -190,7 +208,7 @@ typedef struct vmf_bits_field {
 	bool last;
 } vmf_bits_field;
 
-/* Reusable storage for any value; metadata and type are in the field's node. */
+/* Reusable storage for any value; type is the event's resolved field_kind. */
 typedef union vmf_field {
 	vmf_bool_field boolean;
 	vmf_unsigned_field unsigned_integer;
@@ -205,402 +223,367 @@ typedef union vmf_field {
 /* Return the layout of the individual value struct; unknown kind -> {0,0}. */
 vmf_layout vmf_field_layout(vmf_field_kind kind);
 
-/* ---------- Public C schema types ---------- */
-/* Nonzero, caller-assigned identity, unique throughout one schema tree. */
-typedef uint32_t vmf_node_id;
+/* ---------- Canonical native schemas ---------- */
 
-/* No node/reference. The actual root has a nonzero ID like any other node. */
-#define VMF_NODE_NONE ((vmf_node_id)0)
-
-/* Length-delimited UTF-8 metadata; not required to be NUL-terminated. */
+/* Length-delimited UTF-8 binding data; NULL only with size zero. */
 typedef struct vmf_string {
-	const char *data; /* May be NULL only when size is zero. */
-	size_t size;	  /* Number of bytes, excluding any terminator. */
+	const char *data;
+	size_t size;
 } vmf_string;
 
-/* Logical significance order within an integer or encoded text/octet unit.
- * This does not change the codec's physical packing of bits into wire octets.
- */
+/* DEFAULT resolves to LSB_FIRST; packing and significance are separate. */
 typedef enum vmf_bit_order {
-	VMF_BIT_MSB_FIRST, /* Emit the most significant bit first. */
-	VMF_BIT_LSB_FIRST  /* Emit the least significant bit first. */
+	VMF_BIT_DEFAULT,
+	VMF_BIT_MSB_FIRST,
+	VMF_BIT_LSB_FIRST
 } vmf_bit_order;
 
-/* Numeric interpretation of a fixed-width, right-justified integer code. */
+/* SIGNED requires an explicit signed representation and width >=2.
+ * Other numeric modes default to unsigned. SIGNED rejects negative zero;
+ * SCALED retains exact raw codes, including sentinels and negative zero.
+ */
 typedef enum vmf_integer_representation {
+	VMF_INTEGER_DEFAULT,
 	VMF_INTEGER_UNSIGNED,
 	VMF_INTEGER_TWOS_COMPLEMENT,
 	VMF_INTEGER_ONES_COMPLEMENT,
 	VMF_INTEGER_SIGN_MAGNITUDE
 } vmf_integer_representation;
 
-/* Scalar codes are at most 64 bits. Use VMF_FIELD_BITS for wider values. */
+/* Resolved scalar encoding, returned by inspection. */
 typedef struct vmf_integer_encoding {
-	uint8_t bit_width;   /* 1..64; signed forms require at least 2. */
-	vmf_bit_order order; /* Order of code bits on the logical stream. */
+	uint8_t bit_width;
+	vmf_bit_order order;
 	vmf_integer_representation representation;
 } vmf_integer_encoding;
 
-/* Inclusive interval of unsigned, right-justified raw wire codes. */
+/* Inclusive, disjoint intervals of exact unsigned raw wire codes. */
 typedef struct vmf_code_range {
 	uint64_t first;
-	uint64_t last; /* Must be >= first. */
+	uint64_t last;
 } vmf_code_range;
 
-/* Optional name for an enumeration code or a scaled-value sentinel. */
-typedef struct vmf_code_label {
-	uint64_t code;
-	vmf_string name;
-} vmf_code_label;
-
-/* Exact rational metadata; a used denominator must be nonzero. */
 typedef struct vmf_rational {
 	int64_t numerator;
-	uint64_t denominator;
+	uint64_t denominator; /* Nonzero when the rational is used. */
 } vmf_rational;
 
-/* For non-sentinel codes, physical value = decoded_integer * factor + bias.
- * The streaming API still exchanges the exact raw code, not a float.
- */
+/* Streaming retains raw codes. Sentinel codes bypass factor/bias mapping. */
 typedef struct vmf_scale_definition {
 	vmf_rational factor;
 	vmf_rational bias;
-	const vmf_code_label *sentinels; /* Bypass the numeric scale mapping. */
+	const uint64_t *sentinels;
 	size_t sentinel_count;
 } vmf_scale_definition;
 
-/* Scalar format and code constraints for BOOL/UNSIGNED/SIGNED/ENUM/SCALED.
- * An empty allowed set means all representable codes. Otherwise the code
- * must fall within at least one interval; intervals must be disjoint.
- * Signed numeric ranges must be mapped to raw-code intervals by the caller.
- * Labels are metadata, not an implicit closed enumeration constraint.
- */
-typedef struct vmf_scalar_definition {
-	vmf_integer_encoding encoding;
-	const vmf_code_range *allowed;
-	size_t allowed_count;
-	const vmf_code_label
-		*labels; /* Codes and nonempty names must be unique. */
-	size_t label_count;
-	vmf_scale_definition scale; /* Used only by VMF_FIELD_SCALED. */
-} vmf_scalar_definition;
-
-/* Compare a preceding scalar's raw code, masked before interval testing.
- * A term is true when (code & mask) belongs to any supplied interval, then
- * inverted when negate is true. A term requires at least one interval.
- */
-typedef struct vmf_condition_term {
-	vmf_node_id field;
-	uint64_t mask; /* UINT64_MAX tests the entire raw code. */
-	const vmf_code_range *values;
-	size_t value_count;
-	bool negate;
-} vmf_condition_term;
-
-/* How to combine the terms of one condition. */
-typedef enum vmf_condition_mode {
-	VMF_CONDITION_ALL, /* Logical AND of all terms. */
-	VMF_CONDITION_ANY  /* Logical OR of all terms. */
-} vmf_condition_mode;
-
-/* Conditions contain at least one term; no callbacks or source expressions.
- * Terms read already completed scalar occurrences, never future values.
- */
-typedef struct vmf_condition {
-	vmf_condition_mode mode;
-	const vmf_condition_term *terms;
-	size_t term_count;
-	bool negate; /* Invert the combined result. */
-} vmf_condition;
-
-/* Whether a node exists in the current parent occurrence. */
-typedef enum vmf_presence_kind {
-	VMF_PRESENCE_ALWAYS,   /* No presence information on the wire. */
-	VMF_PRESENCE_BIT,      /* One leading presence bit. */
-	VMF_PRESENCE_CONDITION /* Determined by preceding scalar values. */
-} vmf_presence_kind;
-
-/* Presence is evaluated/emitted before the node's own length/count prefix.
- * An absent node emits one ABSENT event, with no body or child events.
- */
-typedef struct vmf_presence_definition {
-	vmf_presence_kind kind;
-	bool present_bit;	 /* For BIT: bit value that means present. */
-	vmf_condition condition; /* Used only by CONDITION. */
-} vmf_presence_definition;
-
-/* How a field length or a repeat count is obtained. */
-typedef enum vmf_extent_kind {
-	VMF_EXTENT_FIXED,	/* Use fixed directly; no wire control. */
-	VMF_EXTENT_PREFIX,	/* Read/write an unsigned integer prefix. */
-	VMF_EXTENT_FIELD,	/* Use an earlier unsigned scalar code. */
-	VMF_EXTENT_REMAINING,	/* Terminal field consumes bounded remainder. */
-	VMF_EXTENT_MORE_BEFORE, /* Repeat only: flag before each occurrence. */
-	VMF_EXTENT_MORE_AFTER,	/* Repeat only: flag after each occurrence. */
-	VMF_EXTENT_RECURRENCE_BEFORE, /* [more, body], including last body. */
-	VMF_EXTENT_LITERAL /* ASCII7 text: DELETE or maximum terminates. */
-} vmf_extent_kind;
-
-/* Zero maximum means zero, not unlimited; UINT64_MAX means no schema maximum.
- * Configured vmf_limits still apply. UINT64_MAX is reserved as the stream
- * API's UNKNOWN sentinel and cannot be an actual extent. Arithmetic must
- * not wrap; an absent schema maximum does not disable these checks.
- * Field lengths use FIXED/PREFIX/FIELD/REMAINING; ASCII7 text also permits
- * LITERAL. LITERAL bounds count data characters excluding DELETE, with a
- * finite maximum. DELETE is emitted below maximum, omitted at maximum.
- * For a repeat count, REMAINING is invalid. FIELD requires an earlier
- * BOOL/UNSIGNED/ENUM scalar, not a signed or scaled value.
- * PREFIX/FIELD: extent = unsigned code + bias, checked in the mathematical
- * integers before narrowing to uint64_t. Other kinds require bias == 0.
- */
-typedef struct vmf_extent_definition {
-	vmf_extent_kind kind;
-	uint64_t fixed;		     /* Used by FIXED. */
-	vmf_integer_encoding prefix; /* Used by PREFIX; must be unsigned. */
-	vmf_node_id field; /* Used by FIELD; never an implicit prefix. */
-	int64_t bias;	   /* Used only by PREFIX/FIELD. */
-	bool more_bit;	   /* Used by MORE_BEFORE/MORE_AFTER. */
-	uint64_t minimum;  /* Inclusive bound on the logical extent. */
-	uint64_t maximum;  /* Inclusive bound; must be >= minimum. */
-} vmf_extent_definition;
-
-/* Built-in wire text encodings. More encodings require explicit API support;
- * the codec must not substitute one for an unsupported encoding.
- */
-typedef enum vmf_text_encoding {
-	VMF_TEXT_ASCII_7, /* Seven-bit ASCII code units. */
-	VMF_TEXT_ASCII_8, /* Eight-bit units; codes > 127 invalid. */
-	VMF_TEXT_LATIN_1, /* Eight-bit ISO-8859-1 code units. */
-	VMF_TEXT_UTF_8	  /* Eight-bit UTF-8 code units. */
-} vmf_text_encoding;
-
-/* Text lengths and field_event.total_units count WIRE code units, not output
- * bytes or grapheme clusters. UTF-8 therefore counts octets; ASCII/Latin-1
- * count their respective encoded characters. API chunks are always valid UTF-8.
- * Invalid wire text or input UTF-8 is rejected, not silently replaced.
- */
-typedef struct vmf_text_definition {
-	vmf_text_encoding encoding;
-	vmf_bit_order order; /* Within each seven/eight-bit code unit. */
-	vmf_extent_definition length;
-} vmf_text_definition;
-
-/* Lengths and field_event.total_units are octets; no implicit byte alignment.
- */
-typedef struct vmf_octets_definition {
-	vmf_bit_order order; /* Within each eight-bit octet. */
-	vmf_extent_definition length;
-} vmf_octets_definition;
-
-/* Lengths and field_event.total_units are bits. Logical bit zero from the API's
- * vmf_bits_field buffer is the first bit on the logical wire stream.
- */
-typedef struct vmf_bits_definition {
-	vmf_extent_definition length;
-} vmf_bits_definition;
-
-/* Logical field type and its corresponding native wire-format definition.
- * BOOL: unsigned, one-bit encoding, with codes 0=false and 1=true.
- * UNSIGNED/ENUM: unsigned encoding. SIGNED: a signed encoding.
- * SCALED: any integer representation; vmf_scaled_field retains its raw code.
- * Negative-zero codes in signed representations are rejected for SIGNED;
- * use SCALED or BITS when preserving such an exact code is necessary.
- */
-typedef struct vmf_field_schema {
-	vmf_field_kind kind;
-	union {
-		vmf_scalar_definition
-			scalar; /* BOOL/UNSIGNED/SIGNED/ENUM/SCALED. */
-		vmf_text_definition text;     /* TEXT. */
-		vmf_octets_definition octets; /* OCTETS. */
-		vmf_bits_definition bits;     /* BITS. */
-	} as;
-} vmf_field_schema;
-
-/* Public schema nodes, traversed directly by both codecs. */
-typedef struct vmf_node vmf_node;
-
-/* A sequence of children in their exact logical wire/event order. */
-typedef struct vmf_group_schema {
-	const vmf_node *children;
-	size_t child_count;
-} vmf_group_schema;
-
-/* A repeat container always has its own GROUP_BEGIN/GROUP_END, even for
- * zero occurrences. Each occurrence traverses body, which must be an
- * unconditional GROUP and supplies explicit per-occurrence boundaries.
- * REMAINING is not a valid repeat count mode.
- * MORE_BEFORE: [more_bit, body] ... [!more_bit]; zero bodies are possible.
- * MORE_AFTER:  [body, flag] ...; the last flag is !more_bit; minimum >= 1.
- * RECURRENCE_BEFORE: [flag, body] ...; final flag is !more_bit; minimum >=1.
- * A leading-repeat body GROUP_BEGIN carries more_present/more on decode.
- * Encoding unknown counts requires that metadata; known counts derive it
- * and validate supplied metadata. No separate terminal flag is emitted.
- * Validation rejects a potentially nonempty repeat when neither its
- * controls nor its body guarantee consuming at least one bit per item;
- * payload-size limits must also bound traversal work, not just byte I/O.
- */
-typedef struct vmf_repeat_schema {
-	vmf_extent_definition count;
-	const vmf_node *body;
-} vmf_repeat_schema;
-
-/* One choice arm. Code intervals across ALL arms must be disjoint. Tests
- * use the masked selector, not masked interval endpoints. Each arm must
- * have at least one interval.
- */
-typedef struct vmf_choice_case {
-	const vmf_code_range *values;
-	size_t value_count;
-	const vmf_node *body; /* Unconditional FIELD/GROUP/REPEAT/CHOICE. */
-} vmf_choice_case;
-
-/* Select one arm from an earlier scalar's raw code & mask. The choice has
- * GROUP_BEGIN/GROUP_END events surrounding the selected arm. Unselected
- * arms produce no events. No match without otherwise is a runtime error.
- */
-typedef struct vmf_choice_schema {
-	vmf_node_id selector;
-	uint64_t mask;
-	const vmf_choice_case *cases;
-	size_t case_count;
-	const vmf_node *otherwise; /* Optional unconditional fallback. */
-} vmf_choice_schema;
-
-/* All non-FIELD kinds produce balanced GROUP_BEGIN/GROUP_END events. */
-typedef enum vmf_node_kind {
-	VMF_NODE_FIELD,
-	VMF_NODE_GROUP,
-	VMF_NODE_REPEAT,
-	VMF_NODE_CHOICE
-} vmf_node_kind;
-
-/* One node in an acyclic, unshared schema tree; IDs must be unique.
- * Names are optional metadata; IDs, not names, identify dependency sources.
- * Names, IDs, and labels have no wire representation. A tree can be shared
- * by different message schemas, but a node occurs at only one position
- * within any single tree. Runtime repetitions do not duplicate descriptors.
- */
-struct vmf_node {
-	vmf_node_id id;
-	const char *name; /* Optional NUL-terminated metadata. */
-	vmf_presence_definition presence;
-	vmf_node_kind kind;
-	union {
-		vmf_field_schema field;
-		vmf_group_schema group;
-		vmf_repeat_schema repeat;
-		vmf_choice_schema choice;
-	} as;
-};
-
-/* ---------- Message identification and directly usable schemas ---------- */
-
-/* An absent optional value is distinct from a present value equal to zero. */
 typedef struct vmf_optional_u8 {
 	bool present;
-	uint8_t value; /* Ignored when absent. */
+	uint8_t value;
 } vmf_optional_u8;
-
-/* Optional header size or message size. */
 typedef struct vmf_optional_u32 {
 	bool present;
-	uint32_t value; /* Ignored when absent. */
+	uint32_t value;
 } vmf_optional_u32;
+typedef struct vmf_optional_u64 {
+	bool present;
+	uint64_t value;
+} vmf_optional_u64;
+typedef struct vmf_optional_i64 {
+	bool present;
+	int64_t value;
+} vmf_optional_i64;
 
-/* Semantic message identity, extracted from an application envelope. This is
- * NOT a new wire prefix. standard_version describes the MESSAGE standard, not
- * the envelope revision. The field names do not imply that every envelope
- * revision carries every item.
- */
-typedef struct vmf_message_id {
-	uint8_t user_message_format;
-	vmf_optional_u8 standard_version;
-	bool identification_present;
-	uint8_t functional_area; /* Ignored when identification is absent. */
-	uint8_t message_number;	 /* Ignored when identification is absent. */
-	vmf_optional_u8 subtype; /* Must be absent without identification. */
-} vmf_message_id;
-
-/* The schema itself. root is an unconditional GROUP. Static const C
- * initializers are sufficient; there is no build/load/compile prerequisite.
- * octet_order selects whether consecutive logical bits occupy physical bits
- * 0..7 or 7..0 of each payload octet. Field order selects code significance.
- * All body starts are octet-aligned. padding_bit must be zero; the codec
- * pads/checks the last octet after root completion. No implicit field padding.
- */
-typedef struct vmf_message_schema {
-	vmf_message_id id;
-	const char *name; /* Optional NUL-terminated metadata. */
-	const vmf_node *root;
-	vmf_bit_order octet_order;
-	uint8_t padding_bit; /* Must be zero. */
-} vmf_message_schema;
-
-/* A registry is simply an immutable array of schema pointers. It can be built
- * in C at runtime, including by collecting pointers exported by modules.
- * Array, descriptors, and module code/data must outlive all codecs using them.
- * No process-global registry and no first-match/wildcard selection policy.
- */
-typedef struct vmf_schema_set {
-	const vmf_message_schema *const *schemas;
+/* Numeric components, compared numerically. A field address is nonempty. */
+typedef struct vmf_index_number {
+	const uint32_t *parts;
 	size_t count;
-} vmf_schema_set;
+} vmf_index_number;
+typedef uint32_t vmf_group_id;
+typedef uint32_t vmf_repeat_id;
+typedef struct vmf_group_path {
+	const vmf_group_id *parts;
+	size_t count;
+} vmf_group_path;
 
-/* Compare every meaningful member, including optional-presence flags; ignore
- * values of absent members. Never compare struct padding with memcmp.
- * Both arguments must be non-NULL and structurally valid.
- */
-bool vmf_message_id_equal(const vmf_message_id *a, const vmf_message_id *b);
+/* Only a recurrence controller declares maximum on its final component. */
+typedef struct vmf_repeat_component {
+	vmf_repeat_id id;
+	vmf_optional_u64 maximum;
+} vmf_repeat_component;
+typedef struct vmf_repeat_path {
+	const vmf_repeat_component *parts;
+	size_t count;
+} vmf_repeat_path;
 
-/* Check a native schema without creating or owning another representation.
- * Checks types, widths, bounds, IDs, cycles, disjoint choices, dependencies and
- * resource limits. A node reference must dominate its use and identify one
- * completed scalar in the current/ancestor scope, never a future, absent,
- * sibling-repeat or previous-iteration value. Separate count fields remain
- * ordinary events; the writer validates them and never backpatches them.
- * REMAINING extents require a terminal field with an unambiguous unit count
- * after accounting for padding; otherwise UNSUPPORTED_SCHEMA_FEATURE.
- * Arrays and strings must designate valid memory. Unknown encodings are errors,
- * never silently replaced. Only active union members and kind-specific members
- * are read. Zero-initialize descriptors before filling active members.
- * schema/limits are mandatory; error is optional and set on every return.
- */
-vmf_status vmf_schema_validate(const vmf_message_schema *schema,
-	const vmf_limits *limits, vmf_error *error);
-
-/* Validate every schema and reject duplicate semantic identities, even if two
- * entries point to the same schema. Empty sets are valid but identify nothing.
- * schemas may be NULL only for count 0. No schema is modified or retained here.
- */
-vmf_status vmf_schema_set_validate(
-	const vmf_schema_set *set, const vmf_limits *limits, vmf_error *error);
-
-/* Exact identity lookup in a validated set. Missing revision/subtype is not a
- * wildcard and never means "latest". No match -> VMF_UNKNOWN_MESSAGE. Bodies
- * are not trial-parsed to guess a message type. No fallback to the first
- * schema. set/id/result are mandatory; *result = NULL on failure. Duplicate
- * matching entries return VMF_DUPLICATE_MESSAGE, even for an unvalidated set.
- */
-vmf_status vmf_schema_select(const vmf_schema_set *set,
-	const vmf_message_id *id, const vmf_message_schema **result);
-
-/* Find an original node by its nonzero ID. No compiled handle or path syntax.
- * Requires a validated schema; returns NULL for missing ID, zero or NULL
- * schema.
- */
-const vmf_node *vmf_schema_find(
-	const vmf_message_schema *schema, vmf_node_id id);
-
-/* ---------- Revision-specific logical envelope values ---------- */
-
-/* Explicit profile; version 15 is a form, not a profile. */
+/* Explicit profile; shortened on-wire version 15 is not a profile. */
 typedef enum vmf_envelope_version {
 	VMF_ENVELOPE_B = 1,
 	VMF_ENVELOPE_C = 2,
 	VMF_ENVELOPE_D = 3,
 	VMF_ENVELOPE_D1 = 4
 } vmf_envelope_version;
+
+typedef struct vmf_message_number {
+	uint8_t functional_area; /* VMF: 0..10. */
+	uint8_t number; /* 1..127. */
+} vmf_message_number;
+
+typedef enum vmf_message_standard {
+	VMF_STANDARD_6017,
+	VMF_STANDARD_6017A,
+	VMF_STANDARD_6017B,
+	VMF_STANDARD_6017C,
+	VMF_STANDARD_6017D,
+	VMF_STANDARD_6017E,
+	VMF_STANDARD_TIDP_TE_R2,
+	VMF_STANDARD_TIDP_TE_R3,
+	VMF_STANDARD_TIDP_TE_R4,
+	VMF_STANDARD_TIDP_TE_R5,
+	VMF_STANDARD_TIDP_TE_R6,
+	VMF_STANDARD_TIDP_TE_R7,
+	VMF_STANDARD_TIDP_FTE_R6
+} vmf_message_standard;
+typedef enum vmf_standard_selection_kind {
+	VMF_STANDARD_INHERIT,
+	VMF_STANDARD_ABSENT,
+	VMF_STANDARD_EDITION,
+	VMF_STANDARD_RAW_CODE
+} vmf_standard_selection_kind;
+
+/* Message selection replaces the registry selection as one complete value. */
+typedef struct vmf_standard_selection {
+	vmf_standard_selection_kind kind;
+	union {
+		vmf_message_standard edition;
+		uint8_t raw_code;
+	} as;
+} vmf_standard_selection;
+
+/* Exact envelope identity, also used for unrestricted header inspection. */
+typedef struct vmf_message_id {
+	uint8_t user_message_format;
+	vmf_optional_u8 standard_version;
+	bool identification_present;
+	uint8_t functional_area;
+	uint8_t message_number;
+	vmf_optional_u8 subtype;
+} vmf_message_id;
+
+/* Scalars use widths 1..64; BOOL requires 1. BITS/OCTETS/TEXT are fixed
+ * unless length_from selects bounded variable length. LITERAL selects bounded
+ * ASCII7 termination. SCALED requires exact scale metadata.
+ */
+typedef enum vmf_encode_type {
+	VMF_ENCODE_DEFAULT,
+	VMF_ENCODE_BOOL,
+	VMF_ENCODE_UNSIGNED,
+	VMF_ENCODE_SIGNED,
+	VMF_ENCODE_ENUM,
+	VMF_ENCODE_SCALED,
+	VMF_ENCODE_BITS,
+	VMF_ENCODE_OCTETS,
+	VMF_ENCODE_TEXT,
+	VMF_ENCODE_LITERAL
+} vmf_encode_type;
+/* DEFAULT resolves to ASCII7. API text chunks are always valid UTF-8;
+ * lengths count wire code units. LITERAL permits ASCII7 only.
+ */
+typedef enum vmf_text_encoding {
+	VMF_TEXT_DEFAULT,
+	VMF_TEXT_ASCII_7,
+	VMF_TEXT_ASCII_8,
+	VMF_TEXT_LATIN_1,
+	VMF_TEXT_UTF_8
+} vmf_text_encoding;
+
+/* Test (preceding raw code & mask) against disjoint inclusive ranges, then
+ * optionally negate. Sources must dominate use in the current/ancestor scope.
+ */
+typedef struct vmf_condition_term {
+	vmf_index_number field;
+	vmf_optional_u64 mask; /* Omitted means UINT64_MAX. */
+	const vmf_code_range *values;
+	size_t value_count;
+	bool negate;
+} vmf_condition_term;
+typedef enum vmf_condition_mode {
+	VMF_CONDITION_ALL,
+	VMF_CONDITION_ANY
+} vmf_condition_mode;
+/* Nonempty bounded all/any terms, optionally negated as one result. */
+typedef struct vmf_condition {
+	vmf_condition_mode mode;
+	const vmf_condition_term *terms;
+	size_t term_count;
+	bool negate;
+} vmf_condition;
+
+typedef enum vmf_indicator_role {
+	VMF_INDICATOR_NONE,
+	VMF_INDICATOR_FPI,
+	VMF_INDICATOR_GPI,
+	VMF_INDICATOR_FRI,
+	VMF_INDICATOR_GRI
+} vmf_indicator_role;
+typedef enum vmf_target_kind {
+	VMF_TARGET_NONE,
+	VMF_TARGET_INDEX,
+	VMF_TARGET_GROUP
+} vmf_target_kind;
+typedef struct vmf_control_target {
+	vmf_target_kind kind;
+	union {
+		vmf_index_number index;
+		vmf_group_id group;
+	} as;
+} vmf_control_target;
+
+/* Optional refinements are borrowed. Incompatible active properties fail.
+ * length_from is empty for fixed data; its presence selects variable length.
+ * Its units are bits, octets, or wire text units, according to encode_type.
+ * A constant is a required supplied raw code, never an encoder default.
+ */
+typedef struct vmf_index_refinements {
+	vmf_integer_representation representation;
+	vmf_bit_order bit_order;
+	vmf_text_encoding text_encoding;
+	vmf_index_number length_from;
+	vmf_optional_i64 length_bias;
+	const vmf_condition *when;
+	const vmf_code_range *allowed;
+	size_t allowed_count;
+	vmf_optional_u64 constant;
+	const vmf_scale_definition *scale;
+} vmf_index_refinements;
+
+/* Authoritative wire order is array order, never sorted index order.
+ * Fixed data width must be positive. Variable capacity is finite, possibly 0.
+ * Indicator width 0 derives one bit; explicit widths other than 1 fail.
+ * Membership omission means no membership; it never copies a previous row.
+ */
+typedef struct vmf_index_schema {
+	vmf_index_number index_number;
+	uint64_t number_of_bits;
+	vmf_group_path group_code;
+	vmf_repeat_path repeat_code;
+	vmf_encode_type encode_type;
+	vmf_indicator_role indicator;
+	vmf_control_target target;
+	const vmf_index_refinements *refinements;
+	vmf_string key; /* Optional binding key, unique within this message. */
+} vmf_index_schema;
+
+typedef enum vmf_repeat_count_kind {
+	VMF_REPEAT_FIXED,
+	VMF_REPEAT_FIELD
+} vmf_repeat_count_kind;
+typedef struct vmf_repeat_definition {
+	vmf_repeat_id id;
+	vmf_repeat_count_kind kind;
+	uint64_t count; /* FIXED, including zero. */
+	vmf_index_number count_from; /* FIELD: earlier unsigned scalar. */
+	vmf_optional_i64 bias;
+	vmf_optional_u64 minimum; /* FIELD: omission means zero. */
+	uint64_t maximum; /* FIELD: finite inclusive bound. */
+} vmf_repeat_definition;
+
+typedef struct vmf_message_schema {
+	vmf_message_number message_number;
+	const vmf_index_schema *indexes;
+	size_t index_count;
+	vmf_standard_selection standard;
+	vmf_optional_u8 subtype;
+	const vmf_repeat_definition *repeats;
+	size_t repeat_count;
+	vmf_bit_order octet_order;
+} vmf_message_schema;
+
+/* Immutable borrowed registry; all nested arrays/strings outlive its codecs. */
+typedef struct vmf_schema_set {
+	vmf_envelope_version envelope;
+	const vmf_message_schema *messages;
+	size_t message_count;
+	vmf_standard_selection standard;
+} vmf_schema_set;
+
+typedef enum vmf_scope_kind {
+	VMF_SCOPE_NONE,
+	VMF_SCOPE_ROOT,
+	VMF_SCOPE_GROUP,
+	VMF_SCOPE_REPEAT,
+	VMF_SCOPE_REPEAT_BODY
+} vmf_scope_kind;
+typedef struct vmf_scope_ref {
+	vmf_scope_kind kind;
+	uint32_t id; /* Group/repeat ID; zero for root/none. */
+} vmf_scope_ref;
+
+/* Effective interpretation, independent of codec normalization/lifetimes.
+ * Pointers reference canonical registry storage. Indicator mappings remain
+ * inspectable although indicators do not emit ordinary FIELD events.
+ */
+typedef struct vmf_index_info {
+	vmf_field_kind kind;
+	uint64_t number_of_bits;
+	vmf_integer_encoding integer;
+	vmf_text_encoding text_encoding;
+	uint8_t unit_bits;
+	bool variable;
+	bool literal;
+	uint64_t capacity_units;
+	vmf_index_number length_from;
+	int64_t length_bias;
+	const vmf_code_range *allowed;
+	size_t allowed_count;
+	vmf_optional_u64 constant;
+	const vmf_scale_definition *scale;
+	const vmf_condition *when;
+	vmf_indicator_role indicator;
+	vmf_control_target target;
+	vmf_string key;
+} vmf_index_info;
+
+typedef struct vmf_allocator vmf_allocator;
+
+/* Inputs must be readable. Output errors are initialized on every return.
+ * NULL allocator selects malloc/free; paired callbacks follow codec rules.
+ * Validation uses bounded temporary storage, retains nothing and changes no
+ * descriptor. Single-message validation includes registry defaults/context.
+ */
+vmf_status vmf_schema_validate(const vmf_schema_set *set,
+	const vmf_message_schema *message, const vmf_limits *limits,
+	const vmf_allocator *allocator, vmf_error *error);
+vmf_status vmf_schema_set_validate(const vmf_schema_set *set,
+	const vmf_limits *limits, const vmf_allocator *allocator,
+	vmf_error *error);
+
+/* Exact identity; absent values never mean wildcard/latest. Equality requires
+ * two non-NULL structurally valid identities and ignores absent value storage.
+ */
+bool vmf_message_id_equal(const vmf_message_id *a, const vmf_message_id *b);
+/* Resolve a member of set; arguments are mandatory, result clears on failure.
+ * No allocation. Invalid selection/layout identity returns INVALID_SCHEMA.
+ */
+vmf_status vmf_schema_message_id(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_message_id *result);
+/* Select from a validated set. result is mandatory and cleared on failure. */
+vmf_status vmf_schema_select(const vmf_schema_set *set,
+	const vmf_message_id *id, const vmf_message_schema **result);
+/* Native lookups require a validated message; NULL/missing returns NULL. */
+const vmf_index_schema *vmf_schema_find(const vmf_message_schema *message,
+	vmf_index_number number);
+const vmf_index_schema *vmf_schema_find_key(
+	const vmf_message_schema *message, vmf_string key);
+/* Validated set; message/index must belong to it. Clears result on failure.
+ * No allocation. Returned borrowed references require the set to survive.
+ */
+vmf_status vmf_schema_index_info(const vmf_schema_set *set,
+	const vmf_message_schema *message, const vmf_index_schema *index,
+	vmf_index_info *result);
+
+/* ---------- Revision-specific logical envelope values ---------- */
+
+
 
 /* Optional spans distinguish absence from a present empty value. Header text
  * is ASCII without its wire DELETE terminator; binary spans count octets.
@@ -753,8 +736,8 @@ vmf_layout vmf_header_layout(uint8_t profile);
 /* ---------- Events: parsed values, not promises to read a value later
  * ---------- */
 
-/* GROUP events cover GROUP, REPEAT and CHOICE nodes; node->kind distinguishes
- * them. MESSAGE_END is emitted only after schema, length and padding checks.
+/* Scope roles distinguish groups and repeat containers/bodies. MESSAGE_END
+ * follows schema, length and padding checks.
  */
 typedef enum vmf_event_kind {
 	VMF_EVENT_ENVELOPE,
@@ -792,7 +775,7 @@ typedef struct vmf_message_event {
 } vmf_message_event;
 
 /* For REPEAT: count at BEGIN, actual count at END. Indicator-driven BEGIN may
- * be UNKNOWN. Other GROUP/CHOICE/body groups use count 1. No count is a byte
+ * be UNKNOWN. Other groups and repeat bodies use count 1. No count is a byte
  * size.
  */
 typedef struct vmf_group_event {
@@ -808,29 +791,29 @@ typedef struct vmf_group_event {
  * Non-final chunks must contain at least one wire unit. A final empty chunk
  * is allowed only for an empty field; no extra empty event follows its last
  * data. TEXT units are wire code units, OCTETS units are octets, BITS units are
- * bits. Literal and EOF-delimited remainder fields report UNKNOWN totals;
+ * bits. Literal text fields report UNKNOWN totals;
  * their final chunk ends the value. Other reader totals precede field data.
  */
 typedef struct vmf_field_event {
 	uint64_t offset_units;
 	uint64_t total_units;
-	vmf_field value; /* Active member from node->as.field.kind. */
+	vmf_field value; /* Active member from event.field_kind. */
 } vmf_field_event;
 
-/* One event, one scalar or one variable-field chunk, never a whole payload.
- * On decode, schema is non-NULL for every message/body event. node is an
- * ORIGINAL descriptor pointer for FIELD/GROUP/ABSENT and otherwise NULL.
- * Root depth=0. A repeat-body group has occurrence=0,1,...; other nodes have
- * occurrence=0 in their immediate parent. Group nesting identifies ancestors.
- * ENVELOPE and PDU_END use schema=NULL, node=NULL, depth=occurrence=0.
- * MESSAGE_BEGIN/END use node=NULL, depth=occurrence=0.
- * On encode schema may be NULL (use selected schema), otherwise it must match.
- * Inactive union members are ignored. Zero-initialization is recommended.
+/* One scalar or variable-field chunk per FIELD event. index is the original
+ * canonical definition for FIELD/field ABSENT; structural events use scope.
+ * Field kind is resolved, including DEFAULT encodings. schema identifies the
+ * canonical message. Root depth is zero; repeat bodies carry occurrence and
+ * leading recurrence metadata. Independently created codecs sharing a registry
+ * accept replayed references. No pointer refers to private normalized storage.
+ * ENVELOPE/PDU_END have no schema/index/scope; MESSAGE events have only schema.
  */
 typedef struct vmf_event {
 	vmf_event_kind kind;
 	const vmf_message_schema *schema;
-	const vmf_node *node;
+	const vmf_index_schema *index;
+	vmf_scope_ref scope;
+	vmf_field_kind field_kind; /* Resolved FIELD value union member. */
 	size_t depth;
 	uint64_t occurrence;
 	union {
@@ -841,40 +824,11 @@ typedef struct vmf_event {
 	} as;
 } vmf_event;
 
-/* Traversal contract, identical for read and write:
- *
- *   ENVELOPE
- *     MESSAGE_BEGIN
- *       GROUP_BEGIN(root)
- *         FIELD / ABSENT / nested GROUP_BEGIN ... GROUP_END
- *       GROUP_END(root)
- *     MESSAGE_END
- *     ... further envelope-declared messages ...
- *   PDU_END
- *
- * An absent node emits exactly one ABSENT, no value or descendants. A repeat
- * container always has BEGIN/END, even for count 0; each item traverses its
- * unconditional body GROUP. A CHOICE wraps only its selected arm.
- *
- * Presence bits, inline length/count prefixes and recurrence indicators are
- * handled by the codec. They do not become application FIELD events. Explicit
- * scalar count/discriminator fields DO become FIELD events and are retained
- * internally when later schema rules reference them.
- *
- * PREFIX repeats require count before any body output; FIXED/FIELD counts must
- * match the schema/already written scalar. MORE_BEFORE writes true before each
- * item and false at container END, with polarity determined by more_bit.
- * MORE_AFTER writes the next positive flag when the next body BEGIN arrives,
- * or its final negative flag at container END. Thus no advance last-item guess
- * is required. Its first body is mandatory. A body END alone does not flush a
- * pending recurrence flag. Decoder can consume controls between returned
- * events.
- *
- * Variable FIELD prefixes are read before the first value event and written
- * from total_units before the first chunk. The writer checks that chunks add up
- * exactly. It never reads caller data beyond that chunk or advances a new field
- * merely because output capacity remains. Group counts/field lengths, not API
- * chunk boundaries, determine the wire representation.
+/* Read and write share balanced ENVELOPE, MESSAGE_BEGIN, root/group/field,
+ * MESSAGE_END, PDU_END events. An absent region emits one ABSENT.
+ * Repeats have container and per-occurrence body boundaries, including an empty
+ * container for count zero. Indicators are controls, not ordinary data events.
+ * Explicit scalar length/count fields remain events and are never backpatched.
  */
 
 /* ---------- Owned bounded state ---------- */
@@ -889,11 +843,11 @@ typedef struct vmf_encoder vmf_encoder;
  */
 typedef void *(*vmf_allocate)(void *user, size_t size);
 typedef void (*vmf_deallocate)(void *user, void *memory);
-typedef struct vmf_allocator {
+struct vmf_allocator {
 	vmf_allocate allocate;
 	vmf_deallocate deallocate;
 	void *user;
-} vmf_allocator;
+};
 
 /* Mandatory limits, explicit profile and optional immutable schemas/allocator.
  * schemas==NULL means an empty set, permitting independent envelope work.
@@ -908,6 +862,10 @@ typedef struct vmf_options {
 	const vmf_schema_set *schemas;
 	const vmf_allocator *allocator;
 } vmf_options;
+/* Borrow schemas and select its profile with default limits/allocator.
+ * schemas is mandatory. This allocates nothing; creation still validates.
+ */
+vmf_options vmf_options_for_schemas(const vmf_schema_set *schemas);
 vmf_status vmf_decoder_create(
 	const vmf_options *options, vmf_decoder **result, vmf_error *error);
 vmf_status vmf_encoder_create(const vmf_options *options, bool counting_only,
@@ -922,7 +880,7 @@ void vmf_encoder_destroy(vmf_encoder *encoder);
 void vmf_decoder_reset(vmf_decoder *decoder);
 void vmf_encoder_reset(vmf_encoder *encoder);
 
-/* NULL -> INVALID_ARGUMENT with offset/node=0 and message_index=SIZE_MAX. */
+/* NULL -> INVALID_ARGUMENT, offset zero and unavailable locations. */
 vmf_error vmf_decoder_error(const vmf_decoder *decoder);
 vmf_error vmf_encoder_error(const vmf_encoder *encoder);
 /* Logical bits since reset, including pending bits; NULL -> 0. */
@@ -976,7 +934,7 @@ vmf_status vmf_decoder_dispatch(vmf_decoder *decoder, vmf_input *input,
  */
 vmf_status vmf_encoder_begin_envelope(vmf_encoder *encoder);
 
-/* Accept exactly one event from the shared grammar. Schema/node identities,
+/* Accept one event from the shared grammar. Canonical field/scope identities,
  * nesting, counts, chunks, value constraints and padding must match. Body
  * boundaries use MessageSize only; HeaderSize, when present, must equal the
  * measured padded header. Header ranges/size are checked before output; actual
@@ -988,9 +946,8 @@ vmf_status vmf_encoder_begin_envelope(vmf_encoder *encoder);
  * Other errors are terminal until reset; discard previously produced output.
  * Counting mode requires output=NULL and validates size-field presence while
  * ignoring their numeric values. It measures the full envelope and each body;
- * replay events with populated lengths to a normal encoder. Unknown inline
- * prefixes are still invalid. Unambiguous terminal byte REMAINING fields may
- * use UNKNOWN lengths and terminate at their last chunk.
+ * replay events with populated lengths to a normal encoder. Literal fields
+ * may report UNKNOWN totals and terminate at their last chunk.
  * encoder/event mandatory; output mandatory outside counting mode. No aliasing
  * with handle/schema/event storage. Returns OK, NEED_OUTPUT or an error.
  */
@@ -1015,11 +972,11 @@ vmf_status vmf_encoder_measurement(
  * NEED_OUTPUT must retry this entry point with identical arguments.
  */
 vmf_status vmf_encoder_write_field(vmf_encoder *encoder, vmf_output *output,
-	const vmf_node *node, const void *value, size_t value_size,
+	const vmf_index_schema *index, const void *value, size_t value_size,
 	uint64_t total_units);
 
 /* Copy individual value struct, not pointed-to chunk data. Failure leaves
- * value untouched. Requires FIELD event, original field node, exact size and
+ * value untouched. Requires FIELD event, original field index, exact size and
  * aligned nonoverlapping output. Does not mutate a codec.
  */
 vmf_status vmf_event_copy_field(

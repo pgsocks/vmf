@@ -12,7 +12,8 @@ struct configuration {
 	vmf_envelope_version profile;
 	vmf_limits limits;
 	vmf_allocator allocator;
-	vmf_schema_set schemas;
+	const vmf_schema_set *schemas;
+	vmf_runtime_set resolved;
 };
 
 enum decoder_phase {
@@ -48,7 +49,7 @@ struct vmf_decoder {
 	vmf_internal::decoder_phase phase;
 	vmf_error error;
 	vmf_envelope_event envelope;
-	const vmf_message_schema *schema;
+	const vmf_runtime_schema *schema;
 	size_t header_size;
 	size_t header_needed;
 	size_t descriptor;
@@ -66,7 +67,7 @@ struct vmf_encoder {
 	vmf_internal::encoder_phase phase;
 	vmf_error error;
 	vmf_envelope_event envelope;
-	const vmf_message_schema *schema;
+	const vmf_runtime_schema *schema;
 	vmf_measurement measurements[16];
 	bool measured[16];
 	size_t header_size;

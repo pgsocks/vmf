@@ -2,6 +2,7 @@
 #include <cucumber-cpp/autodetect.hpp>
 #include <vmf/wire.h>
 #include "vectors.h"
+#include "../unit/fixtures.hpp"
 #include <algorithm>
 #include <cstring>
 #include <cstdlib>
@@ -11,11 +12,10 @@
 struct codec_context {
 	vmf_decoder *reader = nullptr;
 	vmf_encoder *writer = nullptr;
-	vmf_node root = {};
-	vmf_node field = {};
+	uint32_t part = 1;
+	vmf_index_schema field = {};
 	vmf_message_schema schema = {};
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set schemas = {&entry, 1};
+	vmf_schema_set schemas = {};
 	vmf_options options = {};
 	vmf_status status = VMF_OK;
 	std::vector<uint8_t> bytes;
@@ -56,36 +56,35 @@ static void configure(codec_context *c, int profile)
 	c->options.profile = (vmf_envelope_version)profile;
 	c->options.limits = vmf_default_limits();
 	c->options.schemas = &c->schemas;
-	c->root.id = 1;
-	c->root.kind = VMF_NODE_GROUP;
-	c->root.as.group = {&c->field, 1};
-	c->field.id = 2;
-	c->field.kind = VMF_NODE_FIELD;
-	c->field.as.field.kind = VMF_FIELD_UNSIGNED;
-	c->field.as.field.as.scalar.encoding = {
-		8, VMF_BIT_LSB_FIRST, VMF_INTEGER_UNSIGNED};
-	c->schema.id.user_message_format = 1;
-	c->schema.root = &c->root;
-	c->schema.octet_order = VMF_BIT_LSB_FIRST;
+	c->field.index_number = {&c->part, 1};
+	c->field.number_of_bits = 8;
+	c->schema.message_number = {1, 1};
+	c->schema.indexes = &c->field;
+	c->schema.index_count = 1;
+	c->schemas = {(vmf_envelope_version)profile, &c->schema, 1, {}};
+	if (profile != 1) {
+		c->schemas.standard.kind = VMF_STANDARD_RAW_CODE;
+		c->schemas.standard.as.raw_code = 0;
+	}
 	const uint8_t *data = nullptr;
 	size_t size = 0;
 
 	switch (profile) {
 	case 1:
-		data = vector_b;
-		size = sizeof(vector_b);
+		data = vector_vmf_b;
+		size = sizeof(vector_vmf_b);
 		break;
 	case 2:
-		data = vector_c;
-		size = sizeof(vector_c);
+		data = vector_vmf_c;
+		size = sizeof(vector_vmf_c);
 		break;
 	case 3:
-		data = vector_d;
-		size = sizeof(vector_d);
+		data = vector_vmf_d;
+		size = sizeof(vector_vmf_d);
 		break;
 	case 4:
-		data = vector_d1;
-		size = sizeof(vector_d1);
+		data = vector_vmf_d1;
+		size = sizeof(vector_vmf_d1);
 		break;
 	}
 	c->bytes.assign(data, data + size);
@@ -111,7 +110,8 @@ GIVEN("^an exact identity with another standard version$")
 {
 	cucumber::ScenarioScope<codec_context> c;
 
-	c->schema.id.standard_version = {true, 1};
+	c->schema.standard.kind = VMF_STANDARD_RAW_CODE;
+	c->schema.standard.as.raw_code = 1;
 }
 
 GIVEN("^input arrives one octet at a time$")
@@ -192,6 +192,8 @@ static void replay_event(codec_context *c, const vmf_event *event)
 
 static void decode(codec_context *c, bool header_only)
 {
+	if (header_only)
+		c->options.schemas = nullptr;
 	c->status = vmf_decoder_create(&c->options, &c->reader, nullptr);
 	if (c->status != VMF_OK)
 		return;
@@ -252,7 +254,7 @@ static void decode(codec_context *c, bool header_only)
 				EXPECT_EQ(&c->schema, event.schema);
 			}
 			if (event.kind == VMF_EVENT_FIELD) {
-				EXPECT_EQ(&c->field, event.node);
+				EXPECT_EQ(&c->field, event.index);
 				EXPECT_EQ(
 					0x5au, event.as.field.value
 						       .unsigned_integer.value);
@@ -406,9 +408,8 @@ GIVEN("^the literal (missing|compressed|ack|multiple|security) variant$")
 	size_t bodies = 1;
 
 	if (variant == "missing") {
-		data = vector_missing;
-		size = sizeof(vector_missing);
-		c->schema.id.user_message_format = 0;
+		data = vector_vmf_missing;
+		size = sizeof(vector_vmf_missing);
 	} else if (variant == "compressed") {
 		data = vector_compressed;
 		size = sizeof(vector_compressed);
@@ -421,8 +422,8 @@ GIVEN("^the literal (missing|compressed|ack|multiple|security) variant$")
 		bodies = 0;
 		c->options.schemas = nullptr;
 	} else {
-		data = vector_multiple;
-		size = sizeof(vector_multiple);
+		data = vector_vmf_multiple;
+		size = sizeof(vector_vmf_multiple);
 		bodies = 2;
 	}
 	c->bytes.assign(data, data + size);
@@ -452,32 +453,28 @@ GIVEN("^the D1 precedence code is reserved$")
 {
 	cucumber::ScenarioScope<codec_context> c;
 
-	/* D1 precedence is bits 76..78; set code 7. */
-	c->bytes[9] |= 0x70;
+	/* Synthetic VMF identity adds 16 bits before precedence. */
+	c->bytes[11] |= 0x70;
 }
 
 GIVEN("^the D1 operation requests retransmission without an originator DTG$")
 {
 	cucumber::ScenarioScope<codec_context> c;
 
-	/* Retransmit bit 75 requires the originator DTG group. */
-	c->bytes[9] |= 0x08;
+	/* Retransmit bit 91 requires the originator DTG group. */
+	c->bytes[11] |= 0x08;
 }
 
 WHEN("^I measure and encode the fictitious D1 payload in two chunks$")
 {
 	cucumber::ScenarioScope<codec_context> c;
 
-	c->field.as.field = {};
-	c->field.as.field.kind = VMF_FIELD_OCTETS;
-	c->field.as.field.as.octets.order = VMF_BIT_LSB_FIRST;
-	c->field.as.field.as.octets.length.kind = VMF_EXTENT_FIXED;
-	c->field.as.field.as.octets.length.fixed = 5;
-	c->field.as.field.as.octets.length.minimum = 5;
-	c->field.as.field.as.octets.length.maximum = 5;
+	c->field.encode_type = VMF_ENCODE_OCTETS;
+	c->field.number_of_bits = 40;
 	vmf_message_header message = {};
 
-	message.id = c->schema.id;
+	ASSERT_EQ(VMF_OK, vmf_schema_message_id(
+		&c->schemas, &c->schema, &message.id));
 	message.has_body = true;
 	message.file_name = {true, {"x", 1}};
 	message.message_size_octets = {true, 0};
@@ -489,14 +486,15 @@ WHEN("^I measure and encode the fictitious D1 payload in two chunks$")
 	vmf_event events[8] = {};
 
 	events[0].kind = VMF_EVENT_ENVELOPE;
-	events[0].as.envelope = {4, &header, sizeof(header), 13, 18};
+	events[0].as.envelope = {4, &header, sizeof(header), 15, 20};
 	events[1].kind = VMF_EVENT_MESSAGE_BEGIN;
 	events[1].as.message = {message.id, 0, 5};
 	events[2].kind = VMF_EVENT_GROUP_BEGIN;
-	events[2].node = &c->root;
+	events[2].scope = {VMF_SCOPE_ROOT, 0};
 	events[2].as.group.count = 1;
 	events[3].kind = VMF_EVENT_FIELD;
-	events[3].node = &c->field;
+	events[3].index = &c->field;
+	events[3].field_kind = VMF_FIELD_OCTETS;
 	events[3].depth = 1;
 	events[3].as.field.total_units = 5;
 	events[3].as.field.value.octets = {fictitious_d1, 2, false};
@@ -504,7 +502,7 @@ WHEN("^I measure and encode the fictitious D1 payload in two chunks$")
 	events[4].as.field.offset_units = 2;
 	events[4].as.field.value.octets = {fictitious_d1 + 2, 3, true};
 	events[5].kind = VMF_EVENT_GROUP_END;
-	events[5].node = &c->root;
+	events[5].scope = {VMF_SCOPE_ROOT, 0};
 	events[5].as.group.count = 1;
 	events[6].kind = VMF_EVENT_MESSAGE_END;
 	events[6].as.message = events[1].as.message;
@@ -522,9 +520,9 @@ WHEN("^I measure and encode the fictitious D1 payload in two chunks$")
 	c->status = vmf_encoder_measurement(c->writer, 0, &measurement);
 	if (c->status != VMF_OK)
 		return;
-	EXPECT_EQ(13u, measurement.header_octets);
+	EXPECT_EQ(15u, measurement.header_octets);
 	EXPECT_EQ(5u, measurement.body_octets);
-	EXPECT_EQ(18u, measurement.pdu_octets);
+	EXPECT_EQ(20u, measurement.pdu_octets);
 	message.message_size_octets.value = measurement.body_octets;
 	header.fields.header_size_octets.value = measurement.header_octets;
 	vmf_encoder_destroy(c->writer);
@@ -534,11 +532,9 @@ WHEN("^I measure and encode the fictitious D1 payload in two chunks$")
 		return;
 	for (const auto &event : events)
 		replay_event(c.get(), &event);
-	c->bytes.assign(vector_d1, vector_d1 + sizeof(vector_d1) - 1);
-	/* MessageSize bits 53..72: code 1 -> code 5 changes bit 55. */
-	c->bytes[6] |= 0x80;
-	c->bytes.insert(c->bytes.end(), fictitious_d1,
-		fictitious_d1 + sizeof(fictitious_d1));
+	c->bytes = fixtures::packet(VMF_ENVELOPE_D1,
+		std::vector<uint8_t>(fictitious_d1,
+			fictitious_d1 + sizeof(fictitious_d1)));
 	c->status = VMF_DONE;
 }
 
@@ -588,7 +584,7 @@ WHEN("^allocation fails once and then succeeds$")
 	EXPECT_EQ(0u, probe.live);
 }
 
-THEN("^the retained header still describes one binary body$")
+THEN("^the retained header still describes one VMF body$")
 {
 	cucumber::ScenarioScope<codec_context> c;
 
@@ -598,7 +594,7 @@ THEN("^the retained header still describes one binary body$")
 
 	ASSERT_NE(nullptr, message);
 	EXPECT_TRUE(message->has_body);
-	EXPECT_EQ(1u, message->id.user_message_format);
+	EXPECT_EQ(2u, message->id.user_message_format);
 	ASSERT_TRUE(message->file_name.present);
 	EXPECT_EQ("x", std::string(message->file_name.value.data,
 			       message->file_name.value.size));

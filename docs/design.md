@@ -1,7 +1,7 @@
 # Codec design and accepted costs
 
 The module owns a bounded, bidirectional event codec over immutable C schema
-trees and explicit MIL-STD-2045-47001 envelope profiles. The [API](api.md),
+message/index definitions and explicit MIL-STD-2045-47001 envelope profiles. The [API](api.md),
 [format](format.md) and [local requirements](conformance.md) define its contract.
 Public-fixture checks supplement unit and acceptance tests; they do not establish
 compatibility with a fielded system or provide MIL-STD-6017 definitions.
@@ -11,8 +11,10 @@ compatibility with a fielded system or provide MIL-STD-6017 definitions.
 [LibYAML's event model][yaml] separates parser/emitter from application object
 models. A common event grammar supports incremental translation and replay
 without constructing message-sized objects. VMF adopts balanced structural
-events and values in the event itself; it also exposes original schema node
-pointers for exact field identity. An object-tree decoder would simplify some
+events and values in the event itself. Ordinary field events identify the
+original index definitions; structural events identify canonical group and
+repeat roles. These references work across separate codecs using one registry.
+An object-tree decoder would simplify some
 callers, but its body-sized storage and second serialization model conflict
 with the bounded streaming goal. A callback-only API would make backpressure
 and manual replay harder, so push delivery composes a pull primitive.
@@ -28,12 +30,19 @@ callbacks preserve embedded integration without exposing private layout.
 
 [Nanopb's descriptors and callbacks][nano] demonstrate that small native
 metadata can drive serialization while streams avoid whole-message storage.
-VMF descriptors remain immutable caller-authored C trees: there is no schema
-compiler, generated source requirement or second opaque compiled schema.
-The cost is runtime validation, pointer lifetimes and explicit dependency
-rules. A compact schema bytecode could improve locality and startup work but
-would introduce another representation and toolchain contract. C++ wrappers
-therefore remain aliases and free functions, not owners or a parallel model.
+VMF descriptors are immutable ordered C arrays. A registry selects an envelope
+profile and shared defaults; each message supplies ordered index definitions
+and explicit functional refinements. Core validation and construction share
+default resolution, exact identity checks, scope reconstruction and control
+ownership. The codec owns private normalized traversal storage. Callers need
+no public tree, generated node IDs, separate builder or compilation step.
+C++ wrappers remain aliases and free functions for the C contract.
+
+The optional JSON loader converts strict `vmf-schema/1` syntax into these same
+native definitions. It owns descriptors and converts notation, while the core
+decides semantics. It cannot supply different defaults or validation rules.
+Input bytes can be released after loading; codecs borrow the document
+descriptors until destruction.
 
 The chosen interface accepts exact raw integer/scaled codes and chunked text,
 octets and bits. Floating-point physical values would lose sentinel and exact
@@ -43,7 +52,7 @@ envelope packing; conflating these would obscure each schema's obligations.
 
 ## State and decomposition
 
-Creation must validate profile, limits, schema identities and trees, compute
+Creation must validate profile, limits, schema identities and scopes, compute
 bounded storage with overflow checks, and publish a handle only after all
 allocations succeed. Allocation rollback and destruction use the copied
 allocator. The private implementation is divided into allocation, schema,
@@ -84,8 +93,25 @@ SPI 0 plaintext remains traversable without claiming signature verification.
 Other SPI metadata remains inspectable without assuming plaintext.
 
 Exact schema selection avoids wildcard-version ambiguity and trial parsing.
-Dependency validation must prove scope and progress, including zero-width or
-absent nodes, not merely impose byte limits. Header retention costs bounded
+Envelope profiles never imply a payload-standard edition. Shared selections
+are replaced as a unit by message overrides, preserving absence and present
+zero. A codec rejects a profile that disagrees with its registry.
+
+Groups and repeats follow declaration order and typed membership paths.
+Explicit indicators own presence or leading recurrence bits; ordinary one-bit
+fields remain data. Scope membership alone never adds a bit. Ambiguous or
+crossing scopes fail validation instead of acquiring arbitrary nesting.
+Recurrence always includes a final occurrence preceded by a zero flag.
+Schema values constrain application input; they never manufacture missing
+encoder values.
+
+The public model excludes generic trees, choices, prefix/remainder extents,
+alternative repeat grammars and display labels. Private traversal primitives
+may retain these features where useful. Event logs use canonical references
+and resolved functional manifests to reject replay against incompatible
+definitions.
+Dependency validation must prove scope and progress, including empty fields
+and absent regions, not merely impose byte limits. Header retention costs bounded
 arena storage; chunk retention deliberately remains short. Measurement and
 replay cost a second traversal and require a replayable event source in exchange
 for bounded memory and no output backpatching. Applications needing queued

@@ -1,4 +1,5 @@
-add_library(vmf_cli_support STATIC header_json.cpp event_json.cpp)
+add_library(vmf_cli_support STATIC header_json.cpp event_json.cpp
+	schema_manifest.cpp)
 target_link_libraries(vmf_cli_support PUBLIC vmf::schema_json yyjson)
 
 add_executable(vmf_cli main.cpp)

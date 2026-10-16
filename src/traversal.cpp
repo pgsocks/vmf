@@ -3,6 +3,46 @@
 
 using namespace vmf_internal;
 
+static bool has_reference(const vmf_event *event)
+{
+	return event->index || event->scope.kind != VMF_SCOPE_NONE;
+}
+
+static vmf_status select_runtime(const vmf_runtime_set *set,
+	const vmf_message_id *id, const vmf_runtime_schema **result)
+{
+	*result = nullptr;
+	for (size_t i = 0; i < set->count; ++i) {
+		if (vmf_message_id_equal(&set->schemas[i]->id, id)) {
+			*result = set->schemas[i];
+			return VMF_OK;
+		}
+	}
+	return VMF_UNKNOWN_MESSAGE;
+}
+
+static void payload_location(const vmf_runtime_schema *schema,
+	vmf_node_id id, vmf_error *error)
+{
+	error->index_position = SIZE_MAX;
+	if (!schema)
+		return;
+	for (size_t i = 0; i < schema->binding_count; ++i) {
+		const vmf_node *node = schema->bindings[i];
+
+		if (node->id == id && node->source) {
+			error->index_position = node->source -
+				schema->source->indexes;
+			error->related_scope_id = node->scope.id;
+			error->property = node->kind == VMF_NODE_FIELD
+				? VMF_PROPERTY_ENCODING
+				: node->kind == VMF_NODE_REPEAT
+				? VMF_PROPERTY_REPEAT : VMF_PROPERTY_GROUP;
+			return;
+		}
+	}
+}
+
 static uint64_t pdu_limit(const configuration *config)
 {
 	uint64_t limit = config->limits.max_pdu_octets;
@@ -17,16 +57,20 @@ static vmf_status decoder_fail(vmf_decoder *decoder, vmf_status status)
 	if (status == VMF_NEED_INPUT)
 		return status;
 	decoder->error.status = status;
+	decoder->error.schema_index =
+		decoder->schema && decoder->config.schemas
+		? static_cast<size_t>(decoder->schema->source -
+			decoder->config.schemas->messages) : SIZE_MAX;
 	if (decoder->phase != DECODER_HEADER) {
 		decoder->error.offset = decoder->envelope.header_octets * 8 +
 					decoder->completed_body_octets * 8;
 		if (decoder->phase == DECODER_PAYLOAD)
 			decoder->error.offset += payload_bits(decoder->payload);
 		decoder->error.message_index = decoder->descriptor;
-		decoder->error.node_id =
+		payload_location(decoder->schema,
 			decoder->phase == DECODER_PAYLOAD
-				? payload_error_node(decoder->payload)
-				: 0;
+				? payload_error_node(decoder->payload) : 0,
+			&decoder->error);
 	}
 	decoder->phase = DECODER_FAILED;
 	return status;
@@ -37,13 +81,18 @@ static vmf_status encoder_fail(vmf_encoder *encoder, vmf_status status)
 	if (status == VMF_NEED_OUTPUT)
 		return status;
 	encoder->error.status = status;
+	encoder->error.schema_index =
+		encoder->schema && encoder->config.schemas
+		? static_cast<size_t>(encoder->schema->source -
+			encoder->config.schemas->messages) : SIZE_MAX;
 	encoder->error.offset = encoder->header_written * 8 +
 				encoder->completed_body_octets * 8;
 	encoder->error.message_index = encoder->descriptor;
-	encoder->error.node_id = 0;
+	encoder->error.index_position = SIZE_MAX;
 	if (encoder->phase == ENCODER_PAYLOAD) {
 		encoder->error.offset += payload_bits(encoder->payload);
-		encoder->error.node_id = payload_error_node(encoder->payload);
+		payload_location(encoder->schema,
+			payload_error_node(encoder->payload), &encoder->error);
 	}
 	encoder->phase = ENCODER_FAILED;
 	return status;
@@ -149,8 +198,8 @@ static vmf_status select_decoder(vmf_decoder *decoder, vmf_event *event)
 	if (header->compression.present ||
 		(message->security.present && message->security.spi != 0))
 		return VMF_UNSUPPORTED_ENVELOPE_FEATURE;
-	vmf_status status = vmf_schema_select(
-		&decoder->config.schemas, &message->id, &decoder->schema);
+	vmf_status status = select_runtime(
+		&decoder->config.resolved, &message->id, &decoder->schema);
 
 	if (status != VMF_OK)
 		return status;
@@ -173,7 +222,7 @@ static vmf_status select_decoder(vmf_decoder *decoder, vmf_event *event)
 	decoder->events = 1;
 	decoder->phase = DECODER_PAYLOAD;
 	event->kind = VMF_EVENT_MESSAGE_BEGIN;
-	event->schema = decoder->schema;
+	event->schema = decoder->schema->source;
 	event->as.message = {message->id, decoder->descriptor, length};
 	return VMF_OK;
 }
@@ -231,7 +280,7 @@ vmf_status vmf_decoder_next(
 			uint64_t length = payload_bits(decoder->payload) / 8;
 
 			event->kind = VMF_EVENT_MESSAGE_END;
-			event->schema = decoder->schema;
+			event->schema = decoder->schema->source;
 			event->as.message = {
 				header->messages[decoder->descriptor].id,
 				decoder->descriptor, length};
@@ -261,7 +310,13 @@ vmf_status vmf_decoder_next(
 static bool event_equal(const vmf_event *a, const vmf_event *b)
 {
 	if (a->kind != b->kind || a->schema != b->schema ||
-		a->node != b->node || a->depth != b->depth ||
+		a->index != b->index ||
+		a->scope.kind != b->scope.kind ||
+		(a->scope.kind != VMF_SCOPE_NONE &&
+		 a->scope.id != b->scope.id) ||
+		(a->kind == VMF_EVENT_FIELD &&
+		 a->field_kind != b->field_kind) ||
+		a->depth != b->depth ||
 		a->occurrence != b->occurrence)
 		return false;
 	switch (a->kind) {
@@ -288,14 +343,14 @@ static bool event_equal(const vmf_event *a, const vmf_event *b)
 		       (!a->as.group.more_present ||
 			       a->as.group.more == b->as.group.more);
 	case VMF_EVENT_FIELD: {
-		if (!a->node ||
+		if (!a->index ||
 			a->as.field.offset_units != b->as.field.offset_units ||
 			a->as.field.total_units != b->as.field.total_units)
 			return false;
 		const vmf_field *x = &a->as.field.value,
 				*y = &b->as.field.value;
 
-		switch (a->node->as.field.kind) {
+		switch (a->field_kind) {
 		case VMF_FIELD_BOOL:
 			return x->boolean.value == y->boolean.value;
 		case VMF_FIELD_UNSIGNED:
@@ -402,7 +457,8 @@ static vmf_status start_message(vmf_encoder *encoder, const vmf_event *event)
 	while (encoder->descriptor < header->message_count &&
 		!header->messages[encoder->descriptor].has_body)
 		++encoder->descriptor;
-	if (encoder->descriptor == header->message_count || event->node ||
+	if (encoder->descriptor == header->message_count ||
+		has_reference(event) ||
 		event->depth || event->occurrence ||
 		event->as.message.index != encoder->descriptor)
 		return VMF_INVALID_STATE;
@@ -414,12 +470,12 @@ static vmf_status start_message(vmf_encoder *encoder, const vmf_event *event)
 	if (header->compression.present ||
 		(message->security.present && message->security.spi != 0))
 		return VMF_UNSUPPORTED_ENVELOPE_FEATURE;
-	vmf_status status = vmf_schema_select(
-		&encoder->config.schemas, &message->id, &encoder->schema);
+	vmf_status status = select_runtime(
+		&encoder->config.resolved, &message->id, &encoder->schema);
 
 	if (status != VMF_OK)
 		return status;
-	if (event->schema && event->schema != encoder->schema)
+	if (event->schema && event->schema != encoder->schema->source)
 		return VMF_TYPE_MISMATCH;
 	uint64_t length = event->as.message.payload_octets;
 
@@ -451,7 +507,7 @@ static vmf_status write_event(
 	vmf_encoder *encoder, vmf_output *output, const vmf_event *event)
 {
 	if (encoder->phase == ENCODER_IDLE) {
-		if (event->kind != VMF_EVENT_ENVELOPE || event->node ||
+		if (event->kind != VMF_EVENT_ENVELOPE || has_reference(event) ||
 			event->schema || event->depth || event->occurrence)
 			return VMF_INVALID_STATE;
 		encoder->phase = ENCODER_HEADER;
@@ -464,7 +520,7 @@ static vmf_status write_event(
 	if (encoder->phase == ENCODER_SELECT) {
 		if (event->kind == VMF_EVENT_MESSAGE_BEGIN)
 			return start_message(encoder, event);
-		if (event->kind != VMF_EVENT_PDU_END || event->node ||
+		if (event->kind != VMF_EVENT_PDU_END || has_reference(event) ||
 			event->schema || event->depth || event->occurrence)
 			return VMF_INVALID_STATE;
 		const vmf_header_fields *header = fields(&encoder->envelope);
@@ -484,7 +540,7 @@ static vmf_status write_event(
 	}
 	if (encoder->phase != ENCODER_PAYLOAD)
 		return VMF_INVALID_STATE;
-	if (event->schema && event->schema != encoder->schema)
+	if (event->schema && event->schema != encoder->schema->source)
 		return VMF_TYPE_MISMATCH;
 	if (encoder->events >= encoder->config.limits.max_events_per_message)
 		return VMF_LIMIT_EXCEEDED;
@@ -493,7 +549,7 @@ static vmf_status write_event(
 			&fields(&encoder->envelope)
 				 ->messages[encoder->descriptor];
 
-		if (event->node || event->depth || event->occurrence ||
+		if (has_reference(event) || event->depth || event->occurrence ||
 			event->as.message.index != encoder->descriptor ||
 			!vmf_message_id_equal(
 				&event->as.message.id, &message->id))

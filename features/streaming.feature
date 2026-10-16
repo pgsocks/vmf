@@ -47,7 +47,7 @@ Feature: Streaming input and event replay
     Given the literal envelope for profile 4
     When I decode one complete PDU
     Then the status is DONE
-    And the retained header still describes one binary body
+    And the retained header still describes one VMF body
 
   Scenario: Resuming a paused callback does not replay the consumed envelope
     Given the literal envelope for profile 4

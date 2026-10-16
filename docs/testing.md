@@ -311,7 +311,10 @@ D1 binary-file PDUs in both directions: Daffodil parsed library output into
 the expected infosets, unparsed it to matching literal bytes, and the library
 decoded the independent output through its public API.
 
-The interoperability harness has been removed; this records completed testing.
+The interoperability harness has been removed; this records completed testing
+before the native schema API revision. The current public payload schema API
+accepts VMF definitions; historical binary-file frames remain supported by
+schema-independent envelope inspection.
 The standard unit suite retains the independent C fixture and field-level
 public examples in `tests/unit/`, with attribution in `tests/unit/NOTICE`.
 Java and Daffodil are not build or test dependencies.

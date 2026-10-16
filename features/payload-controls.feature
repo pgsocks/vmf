@@ -15,14 +15,14 @@ Feature: Payload controls survive streamed event replay
     Then the recurrence body flags and values are preserved
     And the payload control replay matches every original octet
 
-  Scenario: A previous scalar controls a choice and conditional presence
-    Given a synthetic conditional choice body in a D1 envelope
+  Scenario: A previous scalar controls field length and conditional presence
+    Given a synthetic conditional fields body in a D1 envelope
     When I decode and replay its payload with single-octet buffers
-    Then the choice bytes and conditional value are preserved
+    Then the field-length bytes and conditional value are preserved
     And the payload control replay matches every original octet
 
-  Scenario: Alternative choice arms cannot supply each other's values
-    Given a payload schema with a dependency between alternative choice arms
+  Scenario: Future fields cannot supply dependencies
+    Given a payload schema with a dependency on a future field
     When I try to create codecs for that payload schema
     Then both codecs reject the schema before reading or writing
 
@@ -32,6 +32,6 @@ Feature: Payload controls survive streamed event replay
     Then the text chunks preserve complete characters and wire offsets
     And the payload control replay matches every original octet
 
-  Scenario: Schema lookup supports caller-configured deep trees
-    Given a valid payload schema with 4096 nested nodes
-    Then schema lookup returns the deepest original node and rejects missing IDs
+  Scenario: Schema lookup supports caller-configured large index tables
+    Given a valid payload schema with 4096 indexes
+    Then schema lookup returns the original last index and rejects missing addresses

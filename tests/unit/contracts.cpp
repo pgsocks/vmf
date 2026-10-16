@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <vmf/wire.hpp>
+#include "../../src/runtime_schema.hpp"
 #include <cstdlib>
 #include <cstring>
 
@@ -62,7 +63,7 @@ TEST(Errors, FailureOutputsAreDeterministic)
 	vmf_input input = {nullptr, 0, 0, true};
 	EXPECT_EQ(VMF_INVALID_ARGUMENT,
 		vmf_decoder_next(nullptr, &input, &event));
-	EXPECT_EQ(nullptr, event.node);
+	EXPECT_EQ(nullptr, event.index);
 	EXPECT_EQ(0u, input.used);
 	vmf_measurement measured = {1, 2, 3};
 	EXPECT_EQ(VMF_INVALID_ARGUMENT,
@@ -71,6 +72,7 @@ TEST(Errors, FailureOutputsAreDeterministic)
 }
 
 /* Product tests assert observable public contracts. */
+
 TEST(Allocation, DefaultCreateResetAndDestroy)
 {
 	vmf_options config = options();
@@ -159,12 +161,12 @@ TEST(Allocation, RejectsUnpairedCallbacksAndMissingProfile)
 		vmf_encoder_create(&config, false, &writer, nullptr));
 }
 
-static vmf_message_schema empty_schema(vmf_node *root)
+static vmf_runtime_schema empty_schema(vmf_node *root)
 {
 	*root = {};
 	root->id = 1;
 	root->kind = VMF_NODE_GROUP;
-	vmf_message_schema schema = {};
+	vmf_runtime_schema schema = {};
 
 	schema.root = root;
 	schema.octet_order = VMF_BIT_LSB_FIRST;
@@ -177,16 +179,16 @@ TEST(Schema, EmptyRootIsValidButZeroIdAndCyclesAreInvalid)
 	auto schema = empty_schema(&root);
 	auto limits = vmf_default_limits();
 	vmf_error error = {};
-
-	EXPECT_EQ(VMF_OK, vmf_schema_validate(&schema, &limits, &error));
+	EXPECT_EQ(VMF_OK, runtime_schema_validate(&schema, &limits, nullptr,
+		&error));
 	root.id = 0;
 	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		vmf_schema_validate(&schema, &limits, &error));
+		runtime_schema_validate(&schema, &limits, nullptr, &error));
 	root.id = 1;
 	root.as.group.children = &root;
 	root.as.group.child_count = 1;
 	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		vmf_schema_validate(&schema, &limits, &error));
+		runtime_schema_validate(&schema, &limits, nullptr, &error));
 }
 
 TEST(Schema, NodeAndDepthLimitsIncludeRootAndRejectOverflow)
@@ -196,40 +198,42 @@ TEST(Schema, NodeAndDepthLimitsIncludeRootAndRejectOverflow)
 	auto limits = vmf_default_limits();
 
 	limits.max_schema_nodes = 1;
-	EXPECT_EQ(VMF_OK, vmf_schema_validate(&schema, &limits, nullptr));
+	EXPECT_EQ(VMF_OK, runtime_schema_validate(&schema, &limits, nullptr,
+		nullptr));
 	vmf_node child = root;
 
 	child.id = 2;
 	root.as.group = {&child, 1};
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED,
-		vmf_schema_validate(&schema, &limits, nullptr));
+		runtime_schema_validate(&schema, &limits, nullptr, nullptr));
 	limits.max_schema_nodes = 2;
 	limits.max_depth = 0;
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED,
-		vmf_schema_validate(&schema, &limits, nullptr));
+		runtime_schema_validate(&schema, &limits, nullptr, nullptr));
 }
 
 TEST(Schema, DuplicateIdentityAndExactSelection)
 {
-	vmf_node root;
-	auto a = empty_schema(&root);
-	auto b = a;
-	const vmf_message_schema *entries[] = {&a, &b};
-	vmf_schema_set set = {entries, 2};
+	vmf_message_schema messages[2] = {};
+	messages[0].message_number = {1, 1};
+	messages[1] = messages[0];
+	vmf_schema_set set = {VMF_ENVELOPE_C, messages, 2, {}};
 	auto limits = vmf_default_limits();
 	const vmf_message_schema *selected = nullptr;
 
 	EXPECT_EQ(VMF_DUPLICATE_MESSAGE,
-		vmf_schema_set_validate(&set, &limits, nullptr));
-	b.id.standard_version = {true, 1};
-	EXPECT_EQ(VMF_OK, vmf_schema_set_validate(&set, &limits, nullptr));
-	EXPECT_EQ(VMF_OK, vmf_schema_select(&set, &b.id, &selected));
-	EXPECT_EQ(&b, selected);
-	vmf_message_id missing = b.id;
-
-	missing.standard_version.value = 2;
+		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
+	messages[1].standard.kind = VMF_STANDARD_RAW_CODE;
+	messages[1].standard.as.raw_code = 1;
+	EXPECT_EQ(VMF_OK,
+		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
+	vmf_message_id id = {};
+	ASSERT_EQ(VMF_OK, vmf_schema_message_id(&set, &messages[1], &id));
+	EXPECT_EQ(VMF_OK, vmf_schema_select(&set, &id, &selected));
+	EXPECT_EQ(&messages[1], selected);
+	id.standard_version.value = 2;
 	EXPECT_EQ(VMF_UNKNOWN_MESSAGE,
-		vmf_schema_select(&set, &missing, &selected));
+		vmf_schema_select(&set, &id, &selected));
 	EXPECT_EQ(nullptr, selected);
 }
 
@@ -239,7 +243,7 @@ TEST(Errors, NullInspectionHasDeterministicContext)
 
 	EXPECT_EQ(VMF_INVALID_ARGUMENT, error.status);
 	EXPECT_EQ(0u, error.offset);
-	EXPECT_EQ(0u, error.node_id);
+	EXPECT_EQ(SIZE_MAX, error.index_position);
 	EXPECT_EQ(SIZE_MAX, error.message_index);
 }
 
@@ -256,21 +260,21 @@ TEST(Schema, ScalarWidthsAndAllowedIntervalsHaveBoundaries)
 		64, VMF_BIT_LSB_FIRST, VMF_INTEGER_UNSIGNED};
 	root.as.group = {&field, 1};
 	auto limits = vmf_default_limits();
-
-	EXPECT_EQ(VMF_OK, vmf_schema_validate(&schema, &limits, nullptr));
+	EXPECT_EQ(VMF_OK, runtime_schema_validate(&schema, &limits, nullptr,
+		nullptr));
 	field.as.field.as.scalar.encoding.bit_width = 0;
 	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		vmf_schema_validate(&schema, &limits, nullptr));
+		runtime_schema_validate(&schema, &limits, nullptr, nullptr));
 	field.as.field.as.scalar.encoding.bit_width = 65;
 	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		vmf_schema_validate(&schema, &limits, nullptr));
+		runtime_schema_validate(&schema, &limits, nullptr, nullptr));
 	field.as.field.as.scalar.encoding.bit_width = 8;
 	vmf_code_range overlapping[] = {{0, 3}, {3, 4}};
 
 	field.as.field.as.scalar.allowed = overlapping;
 	field.as.field.as.scalar.allowed_count = 2;
 	EXPECT_EQ(VMF_INVALID_SCHEMA,
-		vmf_schema_validate(&schema, &limits, nullptr));
+		runtime_schema_validate(&schema, &limits, nullptr, nullptr));
 }
 
 TEST(Events, CopyRejectsWrongLayoutWithoutTouchingOutput)
@@ -345,10 +349,11 @@ TEST(Allocation, SchemaScratchAndCodecStorageRollbackIndependently)
 {
 	allocation_log log;
 	vmf_allocator allocator = {allocate, deallocate, &log};
-	vmf_node root;
-	auto schema = empty_schema(&root);
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set schemas = {&entry, 1};
+	vmf_message_schema schema = {};
+	schema.message_number = {1, 1};
+	schema.standard.kind = VMF_STANDARD_RAW_CODE;
+	schema.standard.as.raw_code = 7;
+	vmf_schema_set schemas = {VMF_ENVELOPE_D1, &schema, 1, {}};
 	vmf_options config = options();
 	vmf_encoder *writer = nullptr;
 

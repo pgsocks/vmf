@@ -37,115 +37,148 @@ inline vmf_options options(
 	return config;
 }
 
-inline std::vector<uint8_t> packet(
-	vmf_envelope_version profile, const std::vector<uint8_t> &body)
+/* Independently assemble the supported minimal Table I grammar. These VMF
+ * identities are synthetic; no assigned payload layout is claimed.
+ */
+inline std::vector<uint8_t> packet(vmf_envelope_version profile,
+	const std::vector<uint8_t> &body, bool sized = true, size_t count = 1)
 {
-	std::vector<uint8_t> bytes;
+	std::vector<unsigned> bits;
+	auto put = [&](uint64_t value, unsigned width) {
+		for (unsigned i = 0; i < width; ++i)
+			bits.push_back((value >> i) & 1);
+	};
 
-	if (profile == VMF_ENVELOPE_C) {
-		bytes.assign(binary_c, binary_c + sizeof(binary_c) - 1);
-		bytes[6] = static_cast<uint8_t>(body.size());
-	} else {
-		bytes.assign(binary_d1, binary_d1 + sizeof(binary_d1) - 1);
-		bytes[6] = (bytes[6] & 0x1f) |
-			   static_cast<uint8_t>((body.size() & 7) << 5);
-		bytes[7] = static_cast<uint8_t>(body.size() >> 3);
+	put(profile, 4);
+	put(0, 4);
+	size_t header_size = 0;
+
+	if (profile != VMF_ENVELOPE_B) {
+		put(1, 1);
+		header_size = bits.size();
+		put(0, 16);
 	}
-	bytes.insert(bytes.end(), body.begin(), body.end());
-	return bytes;
-}
+	if (profile >= VMF_ENVELOPE_D)
+		put(0, 5);
+	for (size_t item = 0; item < count; ++item) {
+		put(item + 1 < count, 1);
+		put(2, 4);
+		if (profile != VMF_ENVELOPE_B) {
+			put(1, 1);
+			put(0, 4);
+		}
+		put(1, 1);
+		put(1, 4);
+		put(1, 7);
+		put(0, 1);
+		put(1, 1);
+		put('x', 7);
+		put(127, 7);
+		put(sized, 1);
+		if (sized)
+			put(body.size(), 20);
+		put(0, 3);
+		put(profile <= VMF_ENVELOPE_C ? 7 : 0, 3);
+		put(0, 8);
+		if (profile >= VMF_ENVELOPE_D)
+			put(0, 5);
+		if (profile != VMF_ENVELOPE_B)
+			put(0, 1);
+	}
+	if (profile >= VMF_ENVELOPE_D)
+		put(0, 5);
+	while (bits.size() % 8)
+		put(0, 1);
+	if (header_size)
+		for (unsigned i = 0; i < 16; ++i)
+			bits[header_size + i] = (bits.size() / 8 >> i) & 1;
+	std::vector<uint8_t> result(bits.size() / 8, 0);
 
-inline void scalar(vmf_node *node, uint32_t id, uint8_t width)
-{
-	*node = {};
-	node->id = id;
-	node->kind = VMF_NODE_FIELD;
-	node->as.field.kind = VMF_FIELD_UNSIGNED;
-	node->as.field.as.scalar.encoding = {
-		width, VMF_BIT_LSB_FIRST, VMF_INTEGER_UNSIGNED};
-}
-
-inline void group(
-	vmf_node *node, uint32_t id, const vmf_node *children, size_t count)
-{
-	*node = {};
-	node->id = id;
-	node->kind = VMF_NODE_GROUP;
-	node->as.group = {children, count};
-}
-
-inline void optional(vmf_node *node)
-{
-	node->presence.kind = VMF_PRESENCE_BIT;
-	node->presence.present_bit = true;
-}
-
-inline void character(vmf_node *node)
-{
-	node->as.field = {};
-	node->as.field.kind = VMF_FIELD_TEXT;
-	auto *text = &node->as.field.as.text;
-
-	text->encoding = VMF_TEXT_ASCII_7;
-	text->order = VMF_BIT_LSB_FIRST;
-	text->length.kind = VMF_EXTENT_FIXED;
-	text->length.fixed = 1;
-	text->length.minimum = 1;
-	text->length.maximum = 1;
+	for (size_t i = 0; i < bits.size(); ++i)
+		result[i / 8] |= bits[i] << (i % 8);
+	for (size_t i = 0; i < count; ++i)
+		result.insert(result.end(), body.begin(), body.end());
+	return result;
 }
 
 struct example_schema {
-	vmf_node root = {};
-	vmf_node fields[7] = {};
-	vmf_node target[3] = {};
-	vmf_node effective[3] = {};
-	vmf_node entity[6] = {};
+	vmf_index_schema indexes[32] = {};
+	uint32_t parts[32][2] = {};
+	vmf_group_id groups[32] = {};
 	vmf_message_schema schema = {};
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set set = {&entry, 1};
+	vmf_schema_set set = {};
 };
+
+inline vmf_index_schema *add_index(example_schema *s, uint32_t major,
+	uint32_t minor, uint64_t width, vmf_group_id group = 0)
+{
+	size_t row = s->schema.index_count++;
+	auto *index = &s->indexes[row];
+
+	s->parts[row][0] = major;
+	s->parts[row][1] = minor;
+	index->index_number = {s->parts[row], minor ? 2u : 1u};
+	index->number_of_bits = width;
+	if (group) {
+		s->groups[row] = group;
+		index->group_code = {&s->groups[row], 1};
+	}
+	return index;
+}
+
+inline vmf_index_schema *optional_index(example_schema *s,
+	uint32_t major, uint64_t width)
+{
+	auto *control = add_index(s, major, 0, 0);
+	auto *field = add_index(s, major, 1, width);
+
+	control->indicator = VMF_INDICATOR_FPI;
+	control->target.kind = VMF_TARGET_INDEX;
+	control->target.as.index = field->index_number;
+	return field;
+}
+
+inline void optional_group(example_schema *s, uint32_t major,
+	vmf_group_id group, const uint8_t *widths, size_t count,
+	size_t text_count = 0)
+{
+	auto *control = add_index(s, major, 0, 0);
+
+	control->indicator = VMF_INDICATOR_GPI;
+	control->target.kind = VMF_TARGET_GROUP;
+	control->target.as.group = group;
+	for (size_t i = 0; i < count; ++i) {
+		auto *field = add_index(s, major, i + 1, widths[i], group);
+
+		if (i < text_count)
+			field->encode_type = VMF_ENCODE_TEXT;
+	}
+}
 
 inline void initialize(example_schema *s, bool d1)
 {
-	uint32_t id = 2;
+	s->schema.message_number = {1, 1};
+	s->schema.indexes = s->indexes;
+	s->set = {d1 ? VMF_ENVELOPE_D1 : VMF_ENVELOPE_C,
+		&s->schema, 1, {}};
+	s->set.standard.kind = VMF_STANDARD_RAW_CODE;
+	s->set.standard.as.raw_code = 0;
+	add_index(s, 1, 0, d1 ? 5 : 3);
+	if (d1)
+		optional_index(s, 2, 7)->encode_type = VMF_ENCODE_TEXT;
+	else
+		add_index(s, 2, 0, 3);
+	uint8_t d_target[] = {7, 14};
+	uint8_t c_target[] = {7, 7, 14};
+	uint8_t effective[] = {5, 6, 6};
+	uint8_t entity[] = {24, 32, 5, 5, 6, 6};
 
-	for (auto &node : s->fields)
-		scalar(&node, id++, 7);
-	for (auto &node : s->target)
-		scalar(&node, id++, 7);
-	uint8_t effective_widths[] = {5, 6, 6};
-	uint8_t entity_widths[] = {24, 32, 5, 5, 6, 6};
-
-	for (size_t i = 0; i < 3; ++i)
-		scalar(&s->effective[i], id++, effective_widths[i]);
-	for (size_t i = 0; i < 6; ++i)
-		scalar(&s->entity[i], id++, entity_widths[i]);
-	group(&s->root, 1, s->fields, 7);
-	s->fields[0].as.field.as.scalar.encoding.bit_width = d1 ? 5 : 3;
-	if (d1) {
-		character(&s->fields[1]);
-		optional(&s->fields[1]);
-		character(&s->target[0]);
-		s->target[1].as.field.as.scalar.encoding.bit_width = 14;
-		group(&s->fields[2], s->fields[2].id, s->target, 2);
-	} else {
-		s->fields[1].as.field.as.scalar.encoding.bit_width = 3;
-		character(&s->target[0]);
-		character(&s->target[1]);
-		s->target[2].as.field.as.scalar.encoding.bit_width = 14;
-		group(&s->fields[2], s->fields[2].id, s->target, 3);
-	}
-	optional(&s->fields[2]);
-	s->fields[3].as.field.as.scalar.encoding.bit_width = d1 ? 21 : 24;
-	optional(&s->fields[3]);
-	group(&s->fields[4], s->fields[4].id, s->effective, 3);
-	optional(&s->fields[4]);
-	optional(&s->fields[5]);
-	group(&s->fields[6], s->fields[6].id, s->entity, 6);
-	optional(&s->fields[6]);
-	s->schema.id.user_message_format = 1;
-	s->schema.root = &s->root;
-	s->schema.octet_order = VMF_BIT_LSB_FIRST;
+	optional_group(s, 3, 1, d1 ? d_target : c_target, d1 ? 2 : 3,
+		d1 ? 1 : 2);
+	optional_index(s, 4, d1 ? 21 : 24);
+	optional_group(s, 5, 2, effective, 3);
+	optional_index(s, 6, 7);
+	optional_group(s, 7, 3, entity, 6);
 }
 
 inline void write(vmf_encoder *encoder, const vmf_event *event,

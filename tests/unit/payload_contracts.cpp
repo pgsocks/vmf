@@ -39,13 +39,13 @@ static vmf_node scalar(vmf_node_id id, vmf_field_kind kind, uint8_t width,
 	return node;
 }
 
-static vmf_message_schema tree(vmf_node *root, vmf_node *children, size_t count)
+static vmf_runtime_schema tree(vmf_node *root, vmf_node *children, size_t count)
 {
 	*root = {};
 	root->id = 100;
 	root->kind = VMF_NODE_GROUP;
 	root->as.group = {children, count};
-	vmf_message_schema schema = {};
+	vmf_runtime_schema schema = {};
 
 	schema.root = root;
 	schema.octet_order = VMF_BIT_LSB_FIRST;
@@ -65,7 +65,7 @@ struct payload_observation {
 	std::string text;
 };
 
-static std::vector<payload_observation> replay(const vmf_message_schema *schema,
+static std::vector<payload_observation> replay(const vmf_runtime_schema *schema,
 	const std::vector<uint8_t> &bytes, bool unknown = false)
 {
 	vmf_limits limits = vmf_default_limits();
@@ -84,9 +84,9 @@ static std::vector<payload_observation> replay(const vmf_message_schema *schema,
 		bytes.empty() ? 0u : 1u, 0, bytes.size() <= 1};
 
 	for (size_t attempts = 0; attempts < 10000; ++attempts) {
-		vmf_event event = {};
+		vmf_runtime_event event = {};
 		vmf_status status =
-			payload_decode(reader.state, &input, &event);
+			runtime_payload_decode(reader.state, &input, &event);
 
 		if (status == VMF_NEED_INPUT) {
 			EXPECT_EQ(input.size, input.used);
@@ -147,7 +147,7 @@ static std::vector<payload_observation> replay(const vmf_message_schema *schema,
 			uint8_t octet;
 			vmf_output output = {&octet, 1, 0};
 
-			written = payload_encode(
+			written = runtime_payload_encode(
 				writer.state, &output, &event, false);
 			if (output.used)
 				encoded.push_back(octet);
@@ -299,19 +299,21 @@ TEST(Payload, RejectsNonzeroPaddingAndTrailingBytes)
 	auto reader = payload_memory(limits);
 	const uint8_t bytes[] = {0x85, 0x00};
 	vmf_input input = {bytes, 1, 0, true};
-	vmf_event event;
+	vmf_runtime_event event;
 
 	payload_begin(reader.state, &schema, 1, 0, false);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	EXPECT_EQ(VMF_MALFORMED, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_MALFORMED,
+		runtime_payload_decode(reader.state, &input, &event));
 	input = {bytes + 1, 1, 0, true};
 	payload_begin(reader.state, &schema, VMF_LENGTH_UNKNOWN, 0, false);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	EXPECT_EQ(VMF_DONE, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_DONE,
+		runtime_payload_decode(reader.state, &input, &event));
 	std::free(reader.memory);
 }
 
@@ -360,7 +362,7 @@ TEST(Payload, PrefixLengthsBiasConditionsAndChoiceUseRawDependency)
 	children[1].kind = VMF_NODE_CHOICE;
 	children[1].as.choice = {1, 3, &arm, 1, nullptr};
 	children[2] = scalar(3, VMF_FIELD_BOOL, 1);
-	vmf_condition_term term = {1, UINT64_MAX, &select, 1, false};
+	vmf_runtime_condition_term term = {1, UINT64_MAX, &select, 1, false};
 
 	children[2].presence.kind = VMF_PRESENCE_CONDITION;
 	children[2].presence.condition = {VMF_CONDITION_ALL, &term, 1, false};
@@ -491,12 +493,12 @@ TEST(Payload, LimitIsCheckedBeforeUndeliverableCodeConsumesInput)
 	auto reader = payload_memory(limits);
 	const uint8_t bytes[] = {1, 2};
 	vmf_input input = {bytes, 2, 0, true};
-	vmf_event event;
+	vmf_runtime_event event;
 
 	payload_begin(reader.state, &schema, VMF_LENGTH_UNKNOWN, 0, false, 1);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
 	EXPECT_EQ(VMF_LIMIT_EXCEEDED,
-		payload_decode(reader.state, &input, &event));
+		runtime_payload_decode(reader.state, &input, &event));
 	EXPECT_EQ(0u, input.used);
 	std::free(reader.memory);
 }
@@ -511,12 +513,13 @@ TEST(Payload, InvalidUtf8AndSignedNegativeZeroAreRejected)
 	auto reader = payload_memory(limits);
 	const uint8_t negative_zero = 31;
 	vmf_input input = {&negative_zero, 1, 0, true};
-	vmf_event event;
+	vmf_runtime_event event;
 
 	payload_begin(reader.state, &schema, 1, 0, false);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
 	EXPECT_EQ(
-		VMF_OUT_OF_RANGE, payload_decode(reader.state, &input, &event));
+		VMF_OUT_OF_RANGE,
+		runtime_payload_decode(reader.state, &input, &event));
 	field = {};
 	field.id = 1;
 	field.kind = VMF_NODE_FIELD;
@@ -529,8 +532,9 @@ TEST(Payload, InvalidUtf8AndSignedNegativeZeroAreRejected)
 
 	input = {surrogate, 3, 0, true};
 	payload_begin(reader.state, &schema, 3, 0, false);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	EXPECT_EQ(VMF_MALFORMED, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_MALFORMED,
+		runtime_payload_decode(reader.state, &input, &event));
 	std::free(reader.memory);
 }
 
@@ -571,23 +575,26 @@ TEST(Payload, UnsizedFixedSchemaWaitsForFinalAndRejectsTrailingRecordData)
 	auto reader = payload_memory(limits);
 	const uint8_t byte = 0x41;
 	vmf_input input = {&byte, 1, 0, false};
-	vmf_event event;
+	vmf_runtime_event event;
 
 	payload_begin(reader.state, &schema, VMF_LENGTH_UNKNOWN, 0, false);
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	EXPECT_EQ(VMF_NEED_INPUT, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_NEED_INPUT,
+		runtime_payload_decode(reader.state, &input, &event));
 	input = {nullptr, 0, 0, true};
-	EXPECT_EQ(VMF_DONE, payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_DONE,
+		runtime_payload_decode(reader.state, &input, &event));
 	payload_begin(reader.state, &schema, VMF_LENGTH_UNKNOWN, 0, false);
 	const uint8_t extra[] = {0x41, 0x42};
 
 	input = {extra, 2, 0, true};
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	ASSERT_EQ(VMF_OK, payload_decode(reader.state, &input, &event));
-	EXPECT_EQ(VMF_MALFORMED, payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	ASSERT_EQ(VMF_OK, runtime_payload_decode(reader.state, &input, &event));
+	EXPECT_EQ(VMF_MALFORMED,
+		runtime_payload_decode(reader.state, &input, &event));
 	EXPECT_EQ(1u, input.used);
 	std::free(reader.memory);
 }
@@ -672,7 +679,7 @@ TEST(Payload, EncoderChecksChunkOffsetsTotalsAndFinalBitPadding)
 	auto writer = payload_memory(limits);
 	uint8_t bytes[1];
 	vmf_output output = {bytes, sizeof(bytes), 0};
-	vmf_event event = {};
+	vmf_runtime_event event = {};
 
 	for (unsigned int failure = 0; failure < 3; ++failure) {
 		payload_begin(writer.state, &schema, 1, 0, false);
@@ -681,7 +688,8 @@ TEST(Payload, EncoderChecksChunkOffsetsTotalsAndFinalBitPadding)
 		event.node = &root;
 		event.as.group.count = 1;
 		ASSERT_EQ(VMF_OK,
-			payload_encode(writer.state, &output, &event, false));
+		runtime_payload_encode(writer.state, &output, &event,
+			false));
 		event = {};
 		event.kind = VMF_EVENT_FIELD;
 		event.node = &field;
@@ -692,7 +700,8 @@ TEST(Payload, EncoderChecksChunkOffsetsTotalsAndFinalBitPadding)
 
 		event.as.field.value.bits = {&bits, 3, true};
 		EXPECT_EQ(VMF_OUT_OF_RANGE,
-			payload_encode(writer.state, &output, &event, false));
+		runtime_payload_encode(writer.state, &output, &event,
+			false));
 		EXPECT_EQ(0u, payload_bits(writer.state));
 	}
 	std::free(writer.memory);
@@ -712,48 +721,32 @@ TEST(Payload, CorrectedNullChunkArgumentDoesNotRepeatItsPrefix)
 	field.as.field.as.octets.length.maximum = 7;
 	vmf_node root;
 	auto schema = tree(&root, &field, 1);
+	auto limits = vmf_default_limits();
+	auto writer = payload_memory(limits);
+	vmf_runtime_event event = {};
+	uint8_t bytes[8] = {};
+	vmf_output output = {bytes, sizeof(bytes), 0};
 
-	schema.id.user_message_format = 1;
-	const vmf_message_schema *entry = &schema;
-	vmf_schema_set set = {&entry, 1};
-	auto options = fixtures::options(VMF_ENVELOPE_D1, &set);
-	auto bytes = fixtures::packet(VMF_ENVELOPE_D1, {0x0a, 0x95, 0x05});
-	vmf_decoder *reader = nullptr;
-	vmf_encoder *writer = nullptr;
+	payload_begin(writer.state, &schema, 3, 0, false);
+	event.kind = VMF_EVENT_GROUP_BEGIN;
+	event.node = &root;
+	event.as.group.count = 1;
+	ASSERT_EQ(VMF_OK,
+		runtime_payload_encode(writer.state, &output, &event, false));
+	event = {};
+	event.kind = VMF_EVENT_FIELD;
+	event.node = &field;
+	event.depth = 1;
+	event.as.field.total_units = 2;
+	event.as.field.value.octets = {nullptr, 2, true};
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		runtime_payload_encode(writer.state, &output, &event, false));
+	EXPECT_EQ(3u, payload_bits(writer.state));
+	const uint8_t content[] = {0xa1, 0xb2};
 
-	ASSERT_EQ(VMF_OK, vmf_decoder_create(&options, &reader, nullptr));
-	ASSERT_EQ(
-		VMF_OK, vmf_encoder_create(&options, false, &writer, nullptr));
-	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
-	vmf_input input = {bytes.data(), bytes.size(), 0, true};
-	std::vector<uint8_t> encoded;
-	bool corrected = false;
-
-	for (size_t i = 0; i < 20; ++i) {
-		vmf_event event = {};
-		vmf_status status = vmf_decoder_next(reader, &input, &event);
-
-		if (status == VMF_DONE)
-			break;
-		ASSERT_EQ(VMF_OK, status);
-		if (event.kind == VMF_EVENT_FIELD) {
-			vmf_event invalid = event;
-
-			invalid.as.field.value.octets.data = nullptr;
-			uint8_t byte;
-			vmf_output output = {&byte, 1, 0};
-			uint64_t before = vmf_encoder_bit_count(writer);
-
-			ASSERT_EQ(VMF_INVALID_ARGUMENT,
-				vmf_encoder_write(writer, &output, &invalid));
-			EXPECT_EQ(0u, output.used);
-			EXPECT_EQ(before + 3, vmf_encoder_bit_count(writer));
-			corrected = true;
-		}
-		fixtures::write(writer, &event, &encoded);
-	}
-	EXPECT_TRUE(corrected);
-	EXPECT_EQ(bytes, encoded);
-	vmf_decoder_destroy(reader);
-	vmf_encoder_destroy(writer);
+	event.as.field.value.octets.data = content;
+	ASSERT_EQ(VMF_OK,
+		runtime_payload_encode(writer.state, &output, &event, false));
+	EXPECT_EQ(19u, payload_bits(writer.state));
+	std::free(writer.memory);
 }

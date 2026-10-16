@@ -21,39 +21,116 @@ initializes its delivered count, and invalid measurements clear their result.
 
 ## Ownership and configuration
 
-Create a decoder/encoder with an explicit B/C/D/D1 profile, explicit limits and
-an optional schema set and allocator. Copy the result of `vmf_default_limits`
-and override only the limits that your application needs. Passing no schema set
-permits independent envelope parsing/encoding. Creation validates complete schema
-trees and duplicate identities, checks allocation arithmetic, and allocates all
-bounded traversal, header and chunk storage. Reset and streaming allocate nothing.
+Create a decoder/encoder with explicit limits and an optional schema registry
+and allocator. A registry selects B/C/D/D1 once; `vmf_options_for_schemas`
+selects that profile and default limits. Manually supplied options must match
+the registry profile. Without a registry, select the profile in ordinary codec
+options for independent envelope parsing/encoding. Creation resolves defaults,
+validates scopes and duplicate wire identities, checks allocation arithmetic,
+and allocates all bounded traversal, header and chunk storage. Reset and
+streaming allocate nothing. Copy `vmf_default_limits` before overriding limits.
 No caller workspace sizing or externally framed/headerless body APIs exist.
 
 Allocator callbacks must be paired and return storage aligned for `max_align_t`.
 NULL configuration selects malloc/free. The codec copies callback pointers and
 caller state, and uses that copy for rollback and destruction; the configuration
 struct itself need not survive creation. The callback state must survive
-destruction. Partial failures free every acquired allocation and return
-OUT_OF_MEMORY with a NULL handle. Destroy and reset accept NULL. A handle is
+destruction. Every failure frees partial allocations and clears the handle;
+allocation failure returns OUT_OF_MEMORY. Destroy and reset accept NULL. A handle is
 single-threaded and must not be reentered, including from callbacks. Distinct
 handles may share immutable schemas across threads.
 
-The schema set, pointer array, nodes, strings, ranges and all referenced data
-are borrowed until handle destruction. Nodes form an acyclic unshared tree per
-schema; the same tree may be used by multiple message identities. Root is an
-unconditional group. IDs are nonzero and unique within a tree. Conditions and
-extents may refer only to already completed dominating scalar occurrences in
-the current/ancestor scope. They cannot read future, optional-unavailable,
-sibling-repeat or previous-iteration values. Limits bound traversal work as
-well as bytes, including zero-bit nodes. Validate widths, progress, ranges and
-branch disjointness before touching wire data. The per-message event limit
-includes MESSAGE_BEGIN and MESSAGE_END as well as field and group events.
+The immutable registry, ordered message/index arrays, paths, keys, ranges and
+all referenced data are borrowed until handle destruction. Distinct codecs
+share definitions but own their resolved traversal and runtime state. No
+public root node or generated node ID is required. Standalone validation and
+codec construction use the same core resolver; the optional JSON loader
+merely constructs these native definitions.
+
+An ordinary index requires its typed number and bit width. Omitted encoding
+means unsigned raw data for widths 1–64. Wider data requires explicit bits,
+octets or text. Fixed width zero is invalid. Physical octet packing and field
+significance independently default to LSB first and support explicit overrides.
+Signed modes require an explicit representation. Text defaults to ASCII7;
+capacity alone never enables variable length or literal termination.
+
+Declaration order controls the wire. Group and repeat paths describe typed
+membership; omitted paths mean no membership. Groups add no automatic bit.
+Explicit FPI/GPI definitions control fields/groups; FRI/GRI definitions control
+leading recurrence with a positive finite maximum. Indicator width is one,
+with omitted width derived from the role. An ordinary one-bit field is data.
+Presence and recurrence use one for present/more. A present recurrence has at
+least one occurrence; a zero flag precedes its final body. Fixed and earlier
+scalar-count repeats use explicit declarations and add no control bit.
+
+Validation rejects crossing, reopened, contradictory or ambiguous scopes,
+duplicate controls and unavailable dependencies. Conditions and lengths/counts
+read only already completed dominating scalars in the current/ancestor scope,
+never future, optional-unavailable, sibling-repeat or previous-iteration values.
+Limits bound traversal work as well as bytes, including empty/absent regions.
+Raw-code constraints and constants validate encoder values; they never supply
+missing values. Scale metadata preserves exact rational factors/bias and raw
+sentinel codes for application inspection, without floating-point conversion.
+
+Payload definitions support VMF (UMF 2). Header-only operations preserve the
+full envelope formats. Registry and message standard selections distinguish
+inheritance, explicit absence, named editions and raw codes. A message replaces
+the entire registry selection; absence is not a wildcard. B cannot emit a
+standard version, C permits absence, and D/D1 require a selection. Envelope
+profiles never imply a payload edition. MIL-STD-6017B resolves to code 8 under C
+and code 7 under D/D1. Subtype presence is independent of its numeric value.
 
 Identity comparison includes UMF, standard-version presence/value,
 identification presence, FAD, number and subtype presence/value. Absent values
 are ignored. Missing values never select the latest revision or act as
 wildcards. Schema lookup returns UNKNOWN_MESSAGE before the first body field;
 acknowledgment-only handling descriptors do not select a payload schema.
+
+## Native definitions and inspection
+
+```c
+#include <vmf/wire.h>
+
+static const uint32_t first[] = {1};
+static const uint32_t second[] = {2};
+static const vmf_index_schema indexes[] = {
+	{.index_number = {first, 1}, .number_of_bits = 5},
+	{.index_number = {second, 1}, .number_of_bits = 13}
+};
+static const vmf_message_schema messages[] = {
+	{.message_number = {1, 1}, .indexes = indexes, .index_count = 2}
+};
+static const vmf_schema_set schemas = {
+	.envelope = VMF_ENVELOPE_C, .messages = messages, .message_count = 1
+};
+
+/* Synthetic layout; no assigned message definition is implied. */
+vmf_status create_example(vmf_decoder **decoder, vmf_error *error)
+{
+	vmf_options options = vmf_options_for_schemas(&schemas);
+	return vmf_decoder_create(&options, decoder, error);
+}
+```
+
+`vmf_schema_set_validate` validates the registry with explicit limits and an
+optional allocator; `vmf_schema_validate` additionally selects a message in
+that registry. Both release temporary storage before returning. Errors carry
+schema/index array positions, a property category and related locations;
+these are source locations, never generated traversal IDs.
+
+`vmf_schema_message_id` resolves exact envelope identity.
+`vmf_schema_find(message, index_number)` and `vmf_schema_find_key` return
+canonical index definitions. `vmf_schema_index_info` returns the effective
+kind, width, encoding, length, constraints, scale and indicator mapping for a
+validated registry. Its output is caller-owned; borrowed nested pointers retain
+the registry lifetime. It allocates nothing. `vmf_event.field_kind` identifies
+the active value union even when the source omitted `encode_type`.
+
+Structural event references distinguish `VMF_SCOPE_ROOT`, `VMF_SCOPE_GROUP`,
+`VMF_SCOPE_REPEAT` and `VMF_SCOPE_REPEAT_BODY`. Root uses ID zero; other roles
+use typed group/repeat IDs. A field event uses its canonical `index` pointer.
+Private traversal addresses never appear in public events. An indicator index
+remains available through lookup/inspection without emitting a FIELD event.
 
 ## Reading a header
 
@@ -108,9 +185,8 @@ Present MessageSize fields delimit bodies and preserve subsequent concatenated
 PDUs. For a sole descriptor without MessageSize, `input.final` supplies the end
 of the enclosing delimited input; until then the decoder requests more input.
 Do not concatenate a later PDU into that input. MESSAGE_BEGIN reports an unknown
-length, and MESSAGE_END reports the actual padded length. A terminal REMAINING
-field and a LITERAL field can report unknown totals on every chunk, including
-the final one; the chunk's last flag ends the value. Multiple descriptors
+length, and MESSAGE_END reports the actual padded length. Literal text can report unknown totals on every chunk, including the final
+one; the chunk's last flag ends the value. Multiple descriptors
 require their standard size fields.
 
 Compression and unsupported SPI processing return
@@ -130,26 +206,26 @@ ENVELOPE
 PDU_END
 ```
 
-The encoder consumes this same grammar with original node pointers. A scalar
+The encoder consumes this same grammar with canonical index and structural
+references from the registry. Independently created codecs using that registry
+can replay events directly. A scalar
 is one FIELD. Variable fields use contiguous chunks and wire-unit offsets;
 text chunks carry valid UTF-8, octets carry bytes and bits use API bit i at
-`data[i/8]` bit `i%8`. Prefix counts, presence bits and recurrence indicators
+`data[i/8]` bit `i%8`. Presence bits and recurrence indicators
 are codec controls rather than FIELD events. Explicit scalar count fields
 remain events and cannot be silently backpatched. Repeats have a container
-begin/end even for zero items, plus per-occurrence body groups. Choices wrap
-only the selected arm. Absent nodes emit exactly one ABSENT.
+begin/end even for zero items, plus per-occurrence body groups. Absent fields/groups emit exactly one ABSENT.
 
-`RECURRENCE_BEFORE` matches the VMF leading recurrence grammar. Every occurrence
+VMF leading recurrence places its flag before each occurrence. Every occurrence
 has a flag before its body indicating whether another occurrence follows.
 Its body GROUP_BEGIN carries `more_present=true` and the `more` decision;
 the decoder exposes that decision and the encoder validates it. The last body
-has `more=false`; there is no extra terminal flag. `MORE_BEFORE` and `MORE_AFTER`
-remain distinct generic grammars.
+has `more=false`; there is no extra terminal flag.
 
-`LITERAL` text extents use bounded seven-bit ASCII with DELETE termination below
+Literal text modes use bounded seven-bit ASCII with DELETE termination below
 the maximum length and no terminator at the maximum. DELETE is a wire control,
 not returned text. The encoder rejects DELETE as content. Payload padding is
-always zero; schema `padding_bit` must be zero.
+always zero, with no per-field alignment or padding override.
 
 FIELD lifetime and API chunk sizes do not change the wire grammar. Non-final
 chunks must make progress; an empty field emits one empty final event. Root
@@ -176,8 +252,8 @@ entire PDU: create with counting_only=true, replay events using output=NULL,
 then inspect `vmf_encoder_measurement` for each original descriptor index.
 Populate the normal header's size values and replay the same event source to
 a normal encoder. Counting validates the intended presence of sizes and measures
-their numeric values instead of trusting placeholder numbers. It still needs
-inline length-prefix totals and known lengths for ambiguous REMAINING fields.
+their numeric values instead of trusting placeholder numbers. Field-derived lengths and counts remain ordinary preceding scalar values;
+they are validated rather than backpatched.
 There is no body-only counting entry point. PDU totals are available after
 PDU_END; an incomplete measurement returns INVALID_STATE, clearing output.
 
@@ -203,43 +279,34 @@ to each declaration in the public header. Input/output/event buffers must not
 overlap each other, schema storage or codec storage. No API throws exceptions,
 performs transport I/O or changes a process-global registry.
 
-A minimal synthetic binary-file schema can be authored directly in C11:
+Public schemas use ordered indexes and explicit controls. Generic node trees,
+choices, prefix/remainder extents, alternative recurrence grammars and display
+labels are outside the public schema model. The JSON loader accepts
+`vmf-schema/1`. CLI recordings store canonical references and exact resolved
+schema manifests.
 
-```c
-static const vmf_node octet = {
-	.id = 2,
-	.kind = VMF_NODE_FIELD,
-	.as.field = {
-		.kind = VMF_FIELD_UNSIGNED,
-		.as.scalar.encoding = {
-			.bit_width = 8,
-			.order = VMF_BIT_LSB_FIRST,
-			.representation = VMF_INTEGER_UNSIGNED
-		}
-	}
-};
-static const vmf_node root = {
-	.id = 1,
-	.kind = VMF_NODE_GROUP,
-	.as.group = {.children = &octet, .child_count = 1}
-};
-static const vmf_message_schema binary = {
-	.id = {.user_message_format = 1},
-	.root = &root,
-	.octet_order = VMF_BIT_LSB_FIRST
-};
-static const vmf_message_schema *const entries[] = {&binary};
-static const vmf_schema_set schemas = {.schemas = entries, .count = 1};
-/* Set options.schemas = &schemas before create. This exact identity has
- * neither message-standard version nor VMF identification. It does not match
- * a header whose optional identity fields are present, even if all are zero.
- */
-```
+## CLI recordings
 
-For a custom allocator, initialize a `vmf_allocator` with allocation and release
-callbacks and caller state, set `options.allocator` before creation, and keep
-only the callback state alive after create. On OUT_OF_MEMORY, the handle is
-NULL and the library has released partial storage; applications may adjust
-limits or retry creation. Changing the allocator configuration struct after
-successful create cannot change which callback frees the handle. User callback
-state itself must not be changed incompatibly while allocations remain live.
+`vmf --profile D1 --schema message.json --record capture.jsonl` reads binary
+stdin and writes diagnostics to stderr. `--forward` additionally copies consumed
+wire bytes to stdout. `--headers-only` needs no schemas and skips bodies; it
+cannot record an event log. Multiple schema files must select one profile.
+Each file's shared message standard is resolved before registries are combined.
+
+`vmf replay capture.jsonl --schema message.json` stages and validates each PDU
+before writing binary stdout. `--timed` preserves recorded intervals. The first
+JSON Lines record has `format: "vmf-events"`, `version: 1`, `profile` and a
+`schemas` array. Each schema entry contains its resolved identity, octet packing,
+ordered functional index definitions and repeat declarations. Replay requires
+an exact matching definition for each recorded identity before producing any
+output. Additional unrelated loaded schemas are allowed; they cannot select
+unguarded bodies. Unsupported archive versions are rejected.
+
+Body event references use numeric `index_number` component arrays or a `scope`
+object with `kind` (`root`, `group`, `repeat` or `repeat_body`) and `id`. They
+include `depth` and decimal-string `occurrence`; generated node IDs and display
+annotations are unsupported. Field values retain exact decimal strings for
+64-bit values, UTF-8 text, and hex octet/bit chunks. Unknown lengths are null.
+Changing a scalar value is supported; changing its schema requires a matching
+manifest. Event ordering, sizes, controls and body padding remain validated by
+the core encoder.

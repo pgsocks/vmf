@@ -1,7 +1,7 @@
 #ifndef VMF_PRIVATE_PAYLOAD_HPP
 #define VMF_PRIVATE_PAYLOAD_HPP
 
-#include <vmf/wire.h>
+#include "runtime_schema.hpp"
 
 namespace vmf_internal
 {
@@ -12,15 +12,23 @@ struct payload_state;
 vmf_status payload_storage_size(const vmf_limits *limits, size_t *size);
 vmf_status payload_init(
 	void *memory, const vmf_limits *limits, payload_state **result);
-void payload_begin(payload_state *state, const vmf_message_schema *schema,
+void payload_begin(payload_state *state, const vmf_runtime_schema *schema,
 	uint64_t payload_octets, uint64_t body_start_bit, bool counting,
 	uint64_t max_octets = VMF_LENGTH_UNKNOWN);
 /* Decode returns DONE only after length and zero-padding validation. */
+vmf_status runtime_payload_decode(
+	payload_state *state, vmf_input *input, vmf_runtime_event *event);
+/* MESSAGE_END is a finish sentinel, permitting resumable padding output. */
+vmf_status runtime_payload_encode(payload_state *state, vmf_output *output,
+	const vmf_runtime_event *event, bool counting);
+/* Public event bridge; all identities refer to borrowed canonical schemas. */
 vmf_status payload_decode(
 	payload_state *state, vmf_input *input, vmf_event *event);
-/* MESSAGE_END is a finish sentinel, permitting resumable padding output. */
 vmf_status payload_encode(payload_state *state, vmf_output *output,
 	const vmf_event *event, bool counting);
+const vmf_runtime_schema *payload_schema(const payload_state *state);
+const vmf_node *payload_event_node(
+	const payload_state *state, const vmf_event *event);
 uint64_t payload_bits(const payload_state *state);
 vmf_node_id payload_error_node(const payload_state *state);
 bool payload_complete(const payload_state *state);

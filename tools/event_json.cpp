@@ -62,19 +62,6 @@ static bool boolean(yyjson_val *value, bool *result)
 	return true;
 }
 
-static bool annotations(yyjson_val *object)
-{
-	const char *keys[] = {"name", "schema_name"};
-
-	for (const char *key : keys) {
-		yyjson_val *value = yyjson_obj_get(object, key);
-
-		if (value && !yyjson_is_str(value))
-			return false;
-	}
-	return true;
-}
-
 static bool add(yyjson_mut_doc *doc, yyjson_mut_val *object,
 	const char *name, yyjson_mut_val *value)
 {
@@ -140,9 +127,8 @@ static bool bytes(yyjson_val *value, cli_arena *arena,
 }
 
 static yyjson_mut_val *field_to_json(yyjson_mut_doc *doc,
-	const vmf_node *node, const vmf_field *field)
+	vmf_field_kind kind, const vmf_field *field)
 {
-	unsigned int kind = node->as.field.kind;
 
 	if (kind >= sizeof(field_names) / sizeof(*field_names))
 		return nullptr;
@@ -159,7 +145,8 @@ static yyjson_mut_val *field_to_json(yyjson_mut_doc *doc,
 		break;
 	case VMF_FIELD_UNSIGNED:
 		if (!add(doc, result, "value",
-			cli_json_uint(doc, field->unsigned_integer.value, false)))
+			cli_json_uint(doc,
+				field->unsigned_integer.value, false)))
 			return nullptr;
 		break;
 	case VMF_FIELD_SIGNED:
@@ -197,7 +184,8 @@ static yyjson_mut_val *field_to_json(yyjson_mut_doc *doc,
 			!add(doc, result, "hex", hex(doc, field->bits.data,
 				(field->bits.bit_count + 7) / 8)) ||
 			!add(doc, result, "bit_count",
-				cli_json_uint(doc, field->bits.bit_count, false)) ||
+				cli_json_uint(doc,
+					field->bits.bit_count, false)) ||
 			!add(doc, result, "last",
 				yyjson_mut_bool(doc, field->bits.last)))
 			return nullptr;
@@ -206,7 +194,7 @@ static yyjson_mut_val *field_to_json(yyjson_mut_doc *doc,
 	return result;
 }
 
-static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
+static vmf_status field_from_json(yyjson_val *object, vmf_field_kind kind,
 	cli_arena *arena, vmf_field *field)
 {
 	const char *const scalar[] = {"kind", "value"};
@@ -214,7 +202,6 @@ static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
 	const char *const text[] = {"kind", "data", "last"};
 	const char *const octets[] = {"kind", "hex", "last"};
 	const char *const bits[] = {"kind", "hex", "bit_count", "last"};
-	unsigned int kind = node->as.field.kind;
 
 	if (kind >= sizeof(field_names) / sizeof(*field_names))
 		return VMF_INVALID_SCHEMA;
@@ -230,7 +217,8 @@ static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
 		break;
 	case VMF_FIELD_UNSIGNED:
 		valid = members(object, scalar, 2) &&
-			cli_json_u64(value, &field->unsigned_integer.value, false);
+			cli_json_u64(value, &field->unsigned_integer.value,
+				false);
 		break;
 	case VMF_FIELD_SIGNED:
 		valid = members(object, scalar, 2) &&
@@ -241,7 +229,8 @@ static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
 		uint64_t raw;
 
 		valid = members(object, code, 2) &&
-			cli_json_u64(yyjson_obj_get(object, "code"), &raw, false);
+			cli_json_u64(yyjson_obj_get(object, "code"), &raw,
+				false);
 		if (valid) {
 			if (kind == VMF_FIELD_ENUM)
 				field->enumeration.code = raw;
@@ -253,10 +242,12 @@ static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
 	case VMF_FIELD_TEXT: {
 		value = yyjson_obj_get(object, "data");
 		if (!members(object, text, 3) || !yyjson_is_str(value) ||
-			!boolean(yyjson_obj_get(object, "last"), &field->text.last))
+			!boolean(yyjson_obj_get(object, "last"),
+				&field->text.last))
 			break;
 		size_t size = yyjson_get_len(value);
-		auto *data = static_cast<char *>(cli_arena_alloc(arena, size + 1));
+		auto *data = static_cast<char *>(
+			cli_arena_alloc(arena, size + 1));
 
 		if (!data)
 			return VMF_OUT_OF_MEMORY;
@@ -279,11 +270,13 @@ static vmf_status field_from_json(yyjson_val *object, const vmf_node *node,
 		size_t size;
 
 		valid = members(object, bits, 4) &&
-			boolean(yyjson_obj_get(object, "last"), &field->bits.last) &&
+			boolean(yyjson_obj_get(object, "last"),
+				&field->bits.last) &&
 			cli_json_u64(yyjson_obj_get(object, "bit_count"),
 				&count, false) && count <= SIZE_MAX - 7 &&
 			bytes(yyjson_obj_get(object, "hex"), arena,
-				&field->bits.data, &size) && size == (count + 7) / 8;
+				&field->bits.data, &size) &&
+			size == (count + 7) / 8;
 		if (!valid)
 			break;
 		field->bits.bit_count = static_cast<size_t>(count);
@@ -354,19 +347,19 @@ yyjson_mut_doc *cli_event_to_json(cli_json *context,
 		event->kind == VMF_EVENT_ABSENT;
 
 	if (body) {
-		valid = valid && event->node &&
-			add(doc, root, "node_id",
-				yyjson_mut_uint(doc, event->node->id)) &&
-			add(doc, root, "depth", yyjson_mut_uint(doc, event->depth)) &&
+		valid = valid && event->schema &&
+			add(doc, root, "depth",
+				yyjson_mut_uint(doc, event->depth)) &&
 			add(doc, root, "occurrence",
 				cli_json_uint(doc, event->occurrence, false));
-		if (valid && event->node->name)
-			valid = add(doc, root, "name",
-				yyjson_mut_strcpy(doc, event->node->name));
+		if (event->index)
+			valid = valid && add(doc, root, "index_number",
+				cli_index_to_json(doc,
+					event->index->index_number));
+		else
+			valid = valid && add(doc, root, "scope",
+				cli_scope_to_json(doc, event->scope));
 	}
-	if (valid && event->schema && event->schema->name)
-		valid = add(doc, root, "schema_name",
-			yyjson_mut_strcpy(doc, event->schema->name));
 	if (valid) {
 		switch (event->kind) {
 		case VMF_EVENT_ENVELOPE: {
@@ -375,8 +368,10 @@ yyjson_mut_doc *cli_event_to_json(cli_json *context,
 			valid = add(doc, root, "time_ns",
 				cli_json_uint(doc, time_ns, false)) &&
 				add(doc, root, "wire_version",
-					yyjson_mut_uint(doc, envelope->wire_version)) &&
-				add(doc, root, "header_octets", cli_json_uint(doc,
+					yyjson_mut_uint(doc,
+						envelope->wire_version)) &&
+				add(doc, root, "header_octets",
+					cli_json_uint(doc,
 					envelope->header_octets, true)) &&
 				add(doc, root, "pdu_octets", cli_json_uint(doc,
 					envelope->pdu_octets, true)) &&
@@ -389,28 +384,36 @@ yyjson_mut_doc *cli_event_to_json(cli_json *context,
 			valid = add(doc, root, "id",
 				cli_id_to_json(doc, &event->as.message.id)) &&
 				add(doc, root, "index",
-					yyjson_mut_uint(doc, event->as.message.index)) &&
-				add(doc, root, "payload_octets", cli_json_uint(doc,
-					event->as.message.payload_octets, true));
+					yyjson_mut_uint(doc,
+						event->as.message.index)) &&
+				add(doc, root, "payload_octets",
+					cli_json_uint(doc,
+					event->as.message.payload_octets,
+						true));
 			break;
 		case VMF_EVENT_FIELD:
-			valid = event->node->kind == VMF_NODE_FIELD &&
-				add(doc, root, "offset_units", cli_json_uint(doc,
+			valid = event->index &&
+				add(doc, root, "offset_units",
+					cli_json_uint(doc,
 					event->as.field.offset_units, true)) &&
 				add(doc, root, "total_units", cli_json_uint(doc,
 					event->as.field.total_units, true)) &&
 				add(doc, root, "value", field_to_json(doc,
-					event->node, &event->as.field.value));
+					event->field_kind,
+					&event->as.field.value));
 			break;
 		case VMF_EVENT_GROUP_BEGIN:
 		case VMF_EVENT_GROUP_END:
-			valid = event->node->kind != VMF_NODE_FIELD &&
+			valid = !event->index &&
+				event->scope.kind != VMF_SCOPE_NONE &&
 				add(doc, root, "count", cli_json_uint(doc,
 					event->as.group.count, true)) &&
-				add(doc, root, "more_present", yyjson_mut_bool(doc,
+				add(doc, root, "more_present",
+					yyjson_mut_bool(doc,
 					event->as.group.more_present)) &&
 				add(doc, root, "more",
-					yyjson_mut_bool(doc, event->as.group.more));
+					yyjson_mut_bool(doc,
+						event->as.group.more));
 			break;
 		case VMF_EVENT_ABSENT:
 		case VMF_EVENT_PDU_END:
@@ -440,22 +443,19 @@ vmf_status cli_event_from_json(yyjson_val *value,
 		if (equal(yyjson_obj_get(value, "event"), event_names[kind]))
 			break;
 	}
-	if (kind == sizeof(event_names) / sizeof(*event_names) ||
-		!annotations(value))
+	if (kind == sizeof(event_names) / sizeof(*event_names))
 		return VMF_MALFORMED;
 	candidate.kind = static_cast<vmf_event_kind>(kind);
 	const char *const envelope[] = {"event", "time_ns", "wire_version",
 		"header_octets", "pdu_octets", "header"};
 	const char *const message[] = {"event", "id", "index",
-		"payload_octets", "schema_name"};
-	const char *const field[] = {"event", "node_id", "depth",
-		"occurrence", "offset_units", "total_units", "value", "name",
-		"schema_name"};
-	const char *const group[] = {"event", "node_id", "depth",
-		"occurrence", "count", "more_present", "more", "name",
-		"schema_name"};
-	const char *const absent[] = {"event", "node_id", "depth",
-		"occurrence", "name", "schema_name"};
+		"payload_octets"};
+	const char *const field[] = {"event", "index_number", "depth",
+		"occurrence", "offset_units", "total_units", "value"};
+	const char *const group[] = {"event", "scope", "depth", "occurrence",
+		"count", "more_present", "more"};
+	const char *const absent[] = {"event", "index_number", "scope", "depth",
+		"occurrence"};
 	const char *const end[] = {"event"};
 	const char *const *keys = nullptr;
 	size_t key_count = 0;
@@ -497,15 +497,31 @@ vmf_status cli_event_from_json(yyjson_val *value,
 	uint64_t numeric = 0;
 
 	if (body) {
-		if (!number(yyjson_obj_get(value, "node_id"), UINT32_MAX,
-			&numeric) || !numeric)
+		yyjson_val *index = yyjson_obj_get(value, "index_number");
+		yyjson_val *scope = yyjson_obj_get(value, "scope");
+
+		if (!*active || (!!index == !!scope))
 			return VMF_MALFORMED;
-		candidate.node = vmf_schema_find(*active,
-			static_cast<vmf_node_id>(numeric));
-		if (!candidate.node)
+		if (index) {
+			vmf_index_number address = {};
+
+			if (!cli_index_from_json(index, arena, &address))
+				return VMF_MALFORMED;
+			candidate.index = vmf_schema_find(*active, address);
+			vmf_index_info info = {};
+
+			if (!candidate.index || vmf_schema_index_info(schemas,
+				*active, candidate.index, &info) != VMF_OK ||
+				info.indicator != VMF_INDICATOR_NONE)
+				return VMF_INVALID_SCHEMA;
+			candidate.field_kind = info.kind;
+		} else if (!cli_scope_from_json(scope, *active,
+			&candidate.scope)) {
 			return VMF_INVALID_SCHEMA;
+		}
 		candidate.schema = *active;
-		if (!number(yyjson_obj_get(value, "depth"), SIZE_MAX, &numeric) ||
+		if (!number(yyjson_obj_get(value, "depth"), SIZE_MAX,
+			&numeric) ||
 			!cli_json_u64(yyjson_obj_get(value, "occurrence"),
 				&candidate.occurrence, false))
 			return VMF_MALFORMED;
@@ -517,7 +533,8 @@ vmf_status cli_event_from_json(yyjson_val *value,
 	switch (candidate.kind) {
 	case VMF_EVENT_ENVELOPE: {
 		if (!number(yyjson_obj_get(value, "wire_version"), UINT8_MAX,
-			&numeric) || !cli_json_u64(yyjson_obj_get(value, "time_ns"),
+			&numeric) ||
+			!cli_json_u64(yyjson_obj_get(value, "time_ns"),
 				&timestamp, false) ||
 			!cli_json_u64(yyjson_obj_get(value, "header_octets"),
 				&candidate.as.envelope.header_octets, true) ||
@@ -533,16 +550,19 @@ vmf_status cli_event_from_json(yyjson_val *value,
 		if (!cli_header_from_json(yyjson_obj_get(value, "header"),
 			profile, arena, header))
 			return VMF_MALFORMED;
-		candidate.as.envelope.wire_version = static_cast<uint8_t>(numeric);
+		candidate.as.envelope.wire_version =
+			static_cast<uint8_t>(numeric);
 		candidate.as.envelope.header = header;
-		candidate.as.envelope.object_size = vmf_header_layout(profile).size;
+		candidate.as.envelope.object_size =
+			vmf_header_layout(profile).size;
 		break;
 	}
 	case VMF_EVENT_MESSAGE_BEGIN:
 	case VMF_EVENT_MESSAGE_END: {
 		if (!cli_id_from_json(yyjson_obj_get(value, "id"),
 			&candidate.as.message.id) ||
-			!number(yyjson_obj_get(value, "index"), SIZE_MAX, &numeric) ||
+			!number(yyjson_obj_get(value, "index"), SIZE_MAX,
+				&numeric) ||
 			!cli_json_u64(yyjson_obj_get(value, "payload_octets"),
 				&candidate.as.message.payload_octets, true))
 			return VMF_MALFORMED;
@@ -555,15 +575,16 @@ vmf_status cli_event_from_json(yyjson_val *value,
 		break;
 	}
 	case VMF_EVENT_FIELD: {
-		if (candidate.node->kind != VMF_NODE_FIELD)
+		if (!candidate.index)
 			return VMF_TYPE_MISMATCH;
 		if (!cli_json_u64(yyjson_obj_get(value, "offset_units"),
 			&candidate.as.field.offset_units, true) ||
 			!cli_json_u64(yyjson_obj_get(value, "total_units"),
 				&candidate.as.field.total_units, true))
 			return VMF_MALFORMED;
-		vmf_status status = field_from_json(yyjson_obj_get(value, "value"),
-			candidate.node, arena, &candidate.as.field.value);
+		vmf_status status = field_from_json(
+			yyjson_obj_get(value, "value"),
+			candidate.field_kind, arena, &candidate.as.field.value);
 
 		if (status != VMF_OK)
 			return status;
@@ -571,7 +592,7 @@ vmf_status cli_event_from_json(yyjson_val *value,
 	}
 	case VMF_EVENT_GROUP_BEGIN:
 	case VMF_EVENT_GROUP_END:
-		if (candidate.node->kind == VMF_NODE_FIELD)
+		if (candidate.index || candidate.scope.kind == VMF_SCOPE_NONE)
 			return VMF_TYPE_MISMATCH;
 		valid = cli_json_u64(yyjson_obj_get(value, "count"),
 			&candidate.as.group.count, true) &&

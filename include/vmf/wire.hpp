@@ -25,34 +25,41 @@ using text_field = ::vmf_text_field;
 using octets_field = ::vmf_octets_field;
 using bits_field = ::vmf_bits_field;
 using field = ::vmf_field;
-using node_id = ::vmf_node_id;
 using string = ::vmf_string;
 using bit_order = ::vmf_bit_order;
 using integer_representation = ::vmf_integer_representation;
 using integer_encoding = ::vmf_integer_encoding;
 using code_range = ::vmf_code_range;
-using code_label = ::vmf_code_label;
 using rational = ::vmf_rational;
 using scale_definition = ::vmf_scale_definition;
-using scalar_definition = ::vmf_scalar_definition;
 using condition_term = ::vmf_condition_term;
 using condition_mode = ::vmf_condition_mode;
 using condition = ::vmf_condition;
-using presence_kind = ::vmf_presence_kind;
-using presence_definition = ::vmf_presence_definition;
-using extent_kind = ::vmf_extent_kind;
-using extent_definition = ::vmf_extent_definition;
 using text_encoding = ::vmf_text_encoding;
-using text_definition = ::vmf_text_definition;
-using octets_definition = ::vmf_octets_definition;
-using bits_definition = ::vmf_bits_definition;
-using field_schema = ::vmf_field_schema;
-using node = ::vmf_node;
-using group_schema = ::vmf_group_schema;
-using repeat_schema = ::vmf_repeat_schema;
-using choice_case = ::vmf_choice_case;
-using choice_schema = ::vmf_choice_schema;
-using node_kind = ::vmf_node_kind;
+using index_number = ::vmf_index_number;
+using index_schema = ::vmf_index_schema;
+using index_refinements = ::vmf_index_refinements;
+using index_info = ::vmf_index_info;
+using group_id = ::vmf_group_id;
+using repeat_id = ::vmf_repeat_id;
+using group_path = ::vmf_group_path;
+using repeat_path = ::vmf_repeat_path;
+using repeat_component = ::vmf_repeat_component;
+using repeat_definition = ::vmf_repeat_definition;
+using repeat_count_kind = ::vmf_repeat_count_kind;
+using scope_ref = ::vmf_scope_ref;
+using scope_kind = ::vmf_scope_kind;
+using indicator_role = ::vmf_indicator_role;
+using control_target = ::vmf_control_target;
+using target_kind = ::vmf_target_kind;
+using encode_type = ::vmf_encode_type;
+using message_number = ::vmf_message_number;
+using message_standard = ::vmf_message_standard;
+using standard_selection = ::vmf_standard_selection;
+using standard_selection_kind = ::vmf_standard_selection_kind;
+using schema_property = ::vmf_schema_property;
+using optional_u64 = ::vmf_optional_u64;
+using optional_i64 = ::vmf_optional_i64;
 using optional_u8 = ::vmf_optional_u8;
 using optional_u32 = ::vmf_optional_u32;
 using message_id = ::vmf_message_id;
@@ -110,16 +117,29 @@ inline bool message_id_equal(const vmf_message_id *a, const vmf_message_id *b)
 	return ::vmf_message_id_equal(a, b);
 }
 
-inline vmf_status schema_validate(const vmf_message_schema *schema,
-	const vmf_limits *limits, vmf_error *error)
+inline vmf_options options_for_schemas(const vmf_schema_set *set)
 {
-	return ::vmf_schema_validate(schema, limits, error);
+	return ::vmf_options_for_schemas(set);
 }
 
-inline vmf_status schema_set_validate(
-	const vmf_schema_set *set, const vmf_limits *limits, vmf_error *error)
+inline vmf_status schema_validate(const vmf_schema_set *set,
+	const vmf_message_schema *message, const vmf_limits *limits,
+	const vmf_allocator *allocator, vmf_error *error)
 {
-	return ::vmf_schema_set_validate(set, limits, error);
+	return ::vmf_schema_validate(set, message, limits, allocator, error);
+}
+
+inline vmf_status schema_set_validate(const vmf_schema_set *set,
+	const vmf_limits *limits, const vmf_allocator *allocator,
+	vmf_error *error)
+{
+	return ::vmf_schema_set_validate(set, limits, allocator, error);
+}
+
+inline vmf_status schema_message_id(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_message_id *result)
+{
+	return ::vmf_schema_message_id(set, message, result);
 }
 
 inline vmf_status schema_select(const vmf_schema_set *set,
@@ -128,10 +148,23 @@ inline vmf_status schema_select(const vmf_schema_set *set,
 	return ::vmf_schema_select(set, id, result);
 }
 
-inline const vmf_node *schema_find(
-	const vmf_message_schema *schema, vmf_node_id id)
+inline const vmf_index_schema *schema_find(
+	const vmf_message_schema *message, vmf_index_number number)
 {
-	return ::vmf_schema_find(schema, id);
+	return ::vmf_schema_find(message, number);
+}
+
+inline const vmf_index_schema *schema_find_key(
+	const vmf_message_schema *message, vmf_string key)
+{
+	return ::vmf_schema_find_key(message, key);
+}
+
+inline vmf_status schema_index_info(const vmf_schema_set *set,
+	const vmf_message_schema *message, const vmf_index_schema *index,
+	vmf_index_info *result)
+{
+	return ::vmf_schema_index_info(set, message, index, result);
 }
 
 inline vmf_layout header_layout(uint8_t profile)
@@ -226,11 +259,11 @@ inline vmf_status encoder_measurement(
 }
 
 inline vmf_status encoder_write_field(vmf_encoder *encoder, vmf_output *output,
-	const vmf_node *node, const void *value, size_t value_size,
+	const vmf_index_schema *index, const void *value, size_t value_size,
 	uint64_t total_units)
 {
 	return ::vmf_encoder_write_field(
-		encoder, output, node, value, value_size, total_units);
+		encoder, output, index, value, value_size, total_units);
 }
 
 inline vmf_status event_copy_field(

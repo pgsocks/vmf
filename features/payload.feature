@@ -1,5 +1,5 @@
 Feature: Exact schema selection and balanced payload events
-  Scenario Outline: Traverse a synthetic binary-file schema
+  Scenario Outline: Traverse a synthetic VMF schema
     Given the literal envelope for profile <profile>
     When I decode one complete PDU
     Then the status is DONE

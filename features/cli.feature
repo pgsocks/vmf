@@ -42,7 +42,7 @@ Feature: Inspect, record, and replay VMF streams from pipes
     When I exercise CLI headers-only
     Then the CLI outcomes match the requested workflow
 
-  Scenario: Require exact and unambiguous payload schema selection
+  Scenario: Require exact identities, profiles, and replay schema definitions
     When I exercise CLI schemas
     Then the CLI outcomes match the requested workflow
 

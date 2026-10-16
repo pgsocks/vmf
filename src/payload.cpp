@@ -47,7 +47,7 @@ struct payload_frame {
 
 struct payload_state {
 	vmf_limits limits;
-	const vmf_message_schema *schema;
+	const vmf_runtime_schema *schema;
 	payload_frame *frames;
 	scalar_slot *scalars;
 	uint8_t *chunk;
@@ -141,7 +141,7 @@ static void push(payload_state *state, const vmf_node *node,
 	frame->more = more;
 }
 
-void payload_begin(payload_state *state, const vmf_message_schema *schema,
+void payload_begin(payload_state *state, const vmf_runtime_schema *schema,
 	uint64_t payload_octets, uint64_t body_start_bit, bool counting,
 	uint64_t max_octets)
 {
@@ -169,6 +169,11 @@ void payload_begin(payload_state *state, const vmf_message_schema *schema,
 	state->finished = false;
 	state->counting = counting;
 	push(state, schema->root, 0);
+}
+
+const vmf_runtime_schema *payload_schema(const payload_state *state)
+{
+	return state ? state->schema : nullptr;
 }
 
 uint64_t payload_bits(const payload_state *state)
@@ -230,13 +235,13 @@ static bool in_ranges(
 }
 
 static vmf_status condition(const payload_state *state,
-	const vmf_condition *definition, bool *result)
+	const vmf_runtime_condition *definition, bool *result)
 {
 	bool all = definition->mode == VMF_CONDITION_ALL;
 	bool value = all;
 
 	for (size_t i = 0; i < definition->term_count; ++i) {
-		const vmf_condition_term *term = &definition->terms[i];
+		const vmf_runtime_condition_term *term = &definition->terms[i];
 		uint64_t code;
 
 		if (!lookup(state, term->field, &code))
@@ -318,7 +323,7 @@ static uint8_t unit_width(const vmf_node *node)
 
 static vmf_status resolve_extent(payload_state *state, payload_frame *frame,
 	const vmf_extent_definition *extent, vmf_input *input,
-	vmf_output *output, const vmf_event *event, bool encoding)
+	vmf_output *output, const vmf_runtime_event *event, bool encoding)
 {
 	uint64_t value = 0;
 	vmf_status status;
@@ -420,7 +425,7 @@ static vmf_status resolve_extent(payload_state *state, payload_frame *frame,
 }
 
 static void event_base(payload_state *state, payload_frame *frame,
-	vmf_event *event, vmf_event_kind kind)
+	vmf_runtime_event *event, vmf_event_kind kind)
 {
 	*event = {};
 	event->kind = kind;
@@ -431,7 +436,7 @@ static void event_base(payload_state *state, payload_frame *frame,
 }
 
 static vmf_status check_event(payload_state *state, payload_frame *frame,
-	const vmf_event *event, vmf_event_kind kind)
+	const vmf_runtime_event *event, vmf_event_kind kind)
 {
 	if (event->kind != kind || event->node != frame->node ||
 		(event->schema && event->schema != state->schema) ||
@@ -450,7 +455,7 @@ static vmf_status delivered(payload_state *state)
 }
 
 static vmf_status scalar_decode(payload_state *state, payload_frame *frame,
-	vmf_input *input, vmf_event *event)
+	vmf_input *input, vmf_runtime_event *event)
 {
 	const vmf_scalar_definition *definition =
 		&frame->node->as.field.as.scalar;
@@ -514,7 +519,7 @@ static vmf_status scalar_decode(payload_state *state, payload_frame *frame,
 }
 
 static vmf_status scalar_encode(payload_state *state, payload_frame *frame,
-	vmf_output *output, const vmf_event *event)
+	vmf_output *output, const vmf_runtime_event *event)
 {
 	vmf_status status = check_event(state, frame, event, VMF_EVENT_FIELD);
 
@@ -635,7 +640,8 @@ static vmf_status field_bounds(
 }
 
 static vmf_status emit_chunk(
-	payload_state *state, payload_frame *frame, vmf_event *event, bool last)
+	payload_state *state, payload_frame *frame,
+	vmf_runtime_event *event, bool last)
 {
 	const vmf_extent_definition *extent = field_extent(frame->node);
 
@@ -675,7 +681,7 @@ static vmf_status emit_chunk(
 }
 
 static vmf_status field_decode(payload_state *state, payload_frame *frame,
-	vmf_input *input, vmf_event *event)
+	vmf_input *input, vmf_runtime_event *event)
 {
 	const vmf_node *node = frame->node;
 	const vmf_extent_definition *extent = field_extent(node);
@@ -828,7 +834,8 @@ static vmf_status utf8_character(const uint8_t *data, size_t size,
 }
 
 static vmf_status chunk_description(const vmf_node *node,
-	const vmf_event *event, const uint8_t **data, size_t *size, bool *last,
+	const vmf_runtime_event *event, const uint8_t **data,
+	size_t *size, bool *last,
 	uint64_t *units)
 {
 	const vmf_field *value = &event->as.field.value;
@@ -895,7 +902,7 @@ static vmf_status chunk_description(const vmf_node *node,
 }
 
 static vmf_status field_encode(payload_state *state, payload_frame *frame,
-	vmf_output *output, const vmf_event *event)
+	vmf_output *output, const vmf_runtime_event *event)
 {
 	vmf_status status = check_event(state, frame, event, VMF_EVENT_FIELD);
 
@@ -1022,7 +1029,8 @@ static vmf_status select_choice(payload_state *state, payload_frame *frame)
 }
 
 static vmf_status group_event(payload_state *state, payload_frame *frame,
-	vmf_event *result, const vmf_event *source, bool encoding, bool begin)
+	vmf_runtime_event *result, const vmf_runtime_event *source,
+	bool encoding, bool begin)
 {
 	vmf_event_kind kind =
 		begin ? VMF_EVENT_GROUP_BEGIN : VMF_EVENT_GROUP_END;
@@ -1058,7 +1066,7 @@ static vmf_status group_event(payload_state *state, payload_frame *frame,
 }
 
 static vmf_status repeat_child(payload_state *state, payload_frame *frame,
-	vmf_input *input, vmf_output *output, const vmf_event *event,
+	vmf_input *input, vmf_output *output, const vmf_runtime_event *event,
 	bool encoding)
 {
 	const vmf_repeat_schema *repeat = &frame->node->as.repeat;
@@ -1169,7 +1177,8 @@ static vmf_status finish(payload_state *state, vmf_input *input,
 }
 
 static vmf_status traverse(payload_state *state, vmf_input *input,
-	vmf_output *output, vmf_event *result, const vmf_event *source,
+	vmf_output *output, vmf_runtime_event *result,
+	const vmf_runtime_event *source,
 	bool encoding)
 {
 	for (;;) {
@@ -1324,8 +1333,8 @@ static vmf_status traverse(payload_state *state, vmf_input *input,
 	}
 }
 
-vmf_status payload_decode(
-	payload_state *state, vmf_input *input, vmf_event *event)
+vmf_status runtime_payload_decode(
+	payload_state *state, vmf_input *input, vmf_runtime_event *event)
 {
 	if (!state || !input || !event || input->used > input->size ||
 		(!input->data && input->size))
@@ -1343,8 +1352,8 @@ vmf_status payload_decode(
 	return status;
 }
 
-vmf_status payload_encode(payload_state *state, vmf_output *output,
-	const vmf_event *event, bool counting)
+vmf_status runtime_payload_encode(payload_state *state, vmf_output *output,
+	const vmf_runtime_event *event, bool counting)
 {
 	if (!state || !event || counting != state->counting ||
 		(!counting && (!output || output->used > output->capacity ||

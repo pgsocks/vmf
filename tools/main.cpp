@@ -41,7 +41,7 @@ struct arguments {
 struct schema_storage {
 	vmf_schema_json_document **documents;
 	size_t count;
-	const vmf_message_schema **entries;
+	vmf_message_schema *entries;
 	vmf_schema_set set;
 };
 
@@ -58,19 +58,26 @@ static void help(void)
 		"       vmf replay FILE|- [OPTIONS]\n\n"
 		"Inspect binary VMF from stdin; print events to stderr.\n"
 		"Replay editable JSON Lines as binary VMF on stdout.\n\n"
-		"  --schema FILE   Load a VMF JSON schema; repeat for more files\n"
+		"  --schema FILE   Load a VMF JSON schema; repeat for "
+		"more files\n"
 		"  -v, --verbose   Add detail; -vvvv includes wire hex\n"
 		"  --record FILE   Create or truncate a complete event log\n"
 		"  --forward       Forward consumed input bytes to stdout\n"
-		"  --headers-only  Inspect headers and skip bodies, no recording\n"
+		"  --headers-only  Inspect headers and skip bodies, no "
+		"recording\n"
 		"  --timed         Replay recorded intervals between PDUs\n"
 		"  -h, --help      Show this help\n\n"
-		"Default: one PDU summary. -v: message boundaries. -vv: values.\n"
-		"-vvv: every event and chunk metadata. -vvvv: headers and hex.\n"
+		"Default: one PDU summary. -v: message boundaries. "
+		"-vv: values.\n"
+		"-vvv: every event and chunk metadata. -vvvv: headers "
+		"and hex.\n"
 		"An unsized PDU must be last and ends at stdin EOF.\n"
-		"Replay uses the log's profile and validates sizes as written.\n"
-		"Schemas must match exact identities and node IDs in the log.\n"
-		"Unknown lengths are null; 64-bit values are decimal strings.\n\n"
+		"Replay uses the log's profile and validates sizes as "
+		"written.\n"
+		"Schemas must match resolved identities and functional "
+		"definitions.\n"
+		"Unknown lengths are null; 64-bit values are decimal "
+		"strings.\n\n"
 		"Example:\n"
 		"  nc localhost 3000 | vmf --profile D1 --schema msg.json"
 		" -vvvv --record session.jsonl\n"
@@ -147,7 +154,8 @@ static bool parse_arguments(int argc, char **argv, arguments *args)
 			if (!*value || !strcmp(value, "-") || args->record)
 				return false;
 			args->record = value;
-		} else if ((value = option_value(argc, argv, &i, "--profile"))) {
+		} else if ((value =
+			option_value(argc, argv, &i, "--profile"))) {
 			if (args->profile ||
 				!cli_profile_parse(value, &args->profile))
 				return false;
@@ -250,13 +258,13 @@ static bool load_schemas(const arguments *args, schema_storage *storage)
 		return true;
 	storage->documents = static_cast<vmf_schema_json_document **>(
 		calloc(args->schema_count, sizeof(*storage->documents)));
-	storage->entries = static_cast<const vmf_message_schema **>(
+	storage->entries = static_cast<vmf_message_schema *>(
 		calloc(options.limits.max_schemas, sizeof(*storage->entries)));
 	if (!storage->documents || !storage->entries) {
 		fputs("vmf: cannot allocate schema registry\n", stderr);
 		return false;
 	}
-	storage->set.schemas = storage->entries;
+	storage->set.messages = storage->entries;
 	for (size_t i = 0; i < args->schema_count; ++i) {
 		bytes input = {};
 		bool read = read_file(args->schemas[i], &input);
@@ -274,30 +282,60 @@ static bool load_schemas(const arguments *args, schema_storage *storage)
 			return false;
 		if (status != VMF_OK) {
 			fprintf(stderr, "vmf: schema %s: %s, byte=%zu"
-				" schema=%zu node=%" PRIu32 "\n",
+				" schema=%zu index=%zu property=%u\n",
 				args->schemas[i], vmf_status_string(status),
 				error.byte_offset, error.schema_index,
-				error.node_id);
+				error.index_position, error.property);
 			return false;
 		}
 		storage->documents[storage->count++] = document;
 		const vmf_schema_set *set = vmf_schema_json_schemas(document);
 
-		if (set->count > options.limits.max_schemas -
-			storage->set.count) {
+		if (storage->set.envelope &&
+			storage->set.envelope != set->envelope) {
+			fputs("vmf: schema files select different profiles\n",
+				stderr);
+			return false;
+		}
+		if (!storage->set.envelope)
+			storage->set.standard = set->standard;
+		storage->set.envelope = set->envelope;
+		if (args->profile && args->profile != set->envelope) {
+			fputs("vmf: --profile disagrees with schema profile\n",
+				stderr);
+			return false;
+		}
+		if (set->message_count > options.limits.max_schemas -
+			storage->set.message_count) {
 			fputs("vmf: aggregate schema limit exceeded\n", stderr);
 			return false;
 		}
-		for (size_t j = 0; j < set->count; ++j)
-			storage->entries[storage->set.count++] = set->schemas[j];
+		for (size_t j = 0; j < set->message_count; ++j) {
+			vmf_message_id id = {};
+
+			if (vmf_schema_message_id(set, &set->messages[j],
+				&id) != VMF_OK)
+				return false;
+			vmf_message_schema *message =
+				&storage->entries[storage->set.message_count++];
+
+			*message = set->messages[j];
+			message->standard.kind = id.standard_version.present ?
+				VMF_STANDARD_RAW_CODE : VMF_STANDARD_ABSENT;
+			message->standard.as.raw_code =
+				id.standard_version.value;
+		}
+
 	}
 	vmf_error error = {};
 	vmf_status status = vmf_schema_set_validate(
-		&storage->set, &options.limits, &error);
+		&storage->set, &options.limits, nullptr, &error);
 
 	if (status != VMF_OK)
-		fprintf(stderr, "vmf: schema registry: %s node=%" PRIu32 "\n",
-			vmf_status_string(status), error.node_id);
+		fprintf(stderr, "vmf: schema registry: %s index=%zu"
+			" property=%u\n",
+			vmf_status_string(status), error.index_position,
+			error.property);
 	return status == VMF_OK;
 }
 
@@ -431,9 +469,10 @@ static void diagnostic(const char *operation, vmf_status status,
 		fprintf(stderr, " line=%zu", line);
 	if (error)
 		fprintf(stderr, " stream_byte=%" PRIu64
-			" bit=%" PRIu64 " descriptor=%zu node=%" PRIu32,
+			" bit=%" PRIu64 " descriptor=%zu index=%zu property=%u",
 			start + error->offset / 8, error->offset,
-			error->message_index, error->node_id);
+			error->message_index, error->index_position,
+			error->property);
 	fputc('\n', stderr);
 }
 
@@ -532,14 +571,21 @@ static bool emit_event(const arguments *args, FILE *record,
 				event->as.envelope.header_octets);
 		} else if (event->kind == VMF_EVENT_FIELD &&
 			args->verbosity == 2) {
-			yyjson_mut_val *root = yyjson_mut_doc_get_root(document);
-			yyjson_mut_val *value = yyjson_mut_obj_get(root, "value");
+			yyjson_mut_val *root =
+				yyjson_mut_doc_get_root(document);
+			yyjson_mut_val *value =
+				yyjson_mut_obj_get(root, "value");
 			char *text = yyjson_mut_val_write_opts(value,
 				YYJSON_WRITE_ESCAPE_UNICODE,
 				&context.allocator, nullptr, nullptr);
 
-			fprintf(stderr, "node=%" PRIu32 " %s",
-				event->node->id, text ? text : "");
+			fprintf(stderr, "index=");
+			vmf_index_number number = event->index->index_number;
+
+			for (size_t i = 0; i < number.count; ++i)
+				fprintf(stderr, "%s%" PRIu32, i ? "." : "",
+					number.parts[i]);
+			fprintf(stderr, " %s", text ? text : "");
 			if (!text)
 				success = false;
 			if (text)
@@ -612,7 +658,7 @@ static int inspect(const arguments *args, const vmf_schema_set *schemas)
 
 	options.profile = args->profile;
 	options.limits = vmf_default_limits();
-	options.schemas = schemas;
+	options.schemas = schemas && schemas->message_count ? schemas : nullptr;
 	vmf_decoder *decoder = nullptr;
 	vmf_error error = {};
 	vmf_status status = vmf_decoder_create(&options, &decoder, &error);
@@ -628,13 +674,28 @@ static int inspect(const arguments *args, const vmf_schema_set *schemas)
 		fprintf(stderr, "vmf: cannot write recording: %s\n",
 			strerror(errno));
 		result = 1;
-	} else if (record &&
-		(fprintf(record, "{\"format\":\"vmf-events\",\"version\":1,"
-			"\"profile\":\"%s\"}\n",
-			cli_profile_name(args->profile)) < 0 || fflush(record))) {
-		fputs("vmf: cannot write recording metadata\n", stderr);
-		result = 1;
+	} else if (record) {
+		cli_json context;
+
+		cli_json_init(&context);
+		yyjson_mut_doc *metadata = cli_metadata_to_json(&context,
+			args->profile, schemas);
+		size_t size = 0;
+		char *line = metadata ? yyjson_mut_write_opts(metadata,
+			YYJSON_WRITE_ESCAPE_UNICODE, &context.allocator,
+			&size, nullptr) : nullptr;
+
+		if (!line || size > json_limit ||
+			fwrite(line, 1, size, record) != size ||
+			fputc('\n', record) == EOF || fflush(record)) {
+			fputs("vmf: cannot write recording metadata\n", stderr);
+			result = 1;
+		}
+		if (line)
+			context.allocator.free(context.allocator.ctx, line);
+		yyjson_mut_doc_free(metadata);
 	}
+
 	uint8_t buffer[8192];
 	vmf_input input = {buffer, 0, 0, false};
 	size_t pdu = 0;
@@ -700,7 +761,8 @@ static int inspect(const arguments *args, const vmf_schema_set *schemas)
 				if (remaining != VMF_LENGTH_UNKNOWN)
 					remaining -= header_octets;
 				status = skip_body(args, &input, buffer,
-					sizeof(buffer), remaining, &offset, start);
+					sizeof(buffer), remaining,
+					&offset, start);
 				if (status != VMF_OK) {
 					diagnostic("skip body", status,
 						nullptr, pdu, start, 0);
@@ -753,18 +815,42 @@ static int read_line(FILE *file, bytes *line)
 	}
 }
 
-static bool metadata(yyjson_val *root, vmf_envelope_version *profile)
+static vmf_status recorded_schemas(yyjson_val *root,
+	const vmf_schema_set *available, vmf_envelope_version *profile,
+	vmf_schema_set *recorded, vmf_message_schema **messages)
 {
-	yyjson_val *format = yyjson_obj_get(root, "format");
-	yyjson_val *version = yyjson_obj_get(root, "version");
-	yyjson_val *edition = yyjson_obj_get(root, "profile");
+	vmf_status status = cli_metadata_from_json(root, available, profile);
 
-	return yyjson_is_obj(root) && yyjson_obj_size(root) == 3 &&
-	       yyjson_equals_str(format, "vmf-events") &&
-	       yyjson_is_uint(version) && yyjson_get_uint(version) == 1 &&
-	       yyjson_is_str(edition) &&
-	       strlen(yyjson_get_str(edition)) == yyjson_get_len(edition) &&
-	       cli_profile_parse(yyjson_get_str(edition), profile);
+	if (status != VMF_OK)
+		return status;
+	yyjson_val *definitions = yyjson_obj_get(root, "schemas");
+	size_t count = yyjson_arr_size(definitions);
+	auto *entries = count ? static_cast<vmf_message_schema *>(
+		calloc(count, sizeof(vmf_message_schema))) : nullptr;
+
+	if (count && !entries)
+		return VMF_OUT_OF_MEMORY;
+	for (size_t i = 0; i < count; ++i) {
+		vmf_message_id id = {};
+		const vmf_message_schema *message = nullptr;
+
+		cli_id_from_json(yyjson_obj_get(yyjson_arr_get(definitions, i),
+			"id"), &id);
+		status = vmf_schema_select(available, &id, &message);
+		if (status != VMF_OK) {
+			free(entries);
+			return status;
+		}
+		entries[i] = *message;
+	}
+	*recorded = {};
+	recorded->envelope = *profile;
+	recorded->messages = entries;
+	recorded->message_count = count;
+	if (available)
+		recorded->standard = available->standard;
+	*messages = entries;
+	return VMF_OK;
 }
 
 static vmf_status encode_event(vmf_encoder *encoder,
@@ -788,12 +874,21 @@ static bool check_measurement(vmf_encoder *encoder, uint64_t header,
 	vmf_measurement measurement = {};
 	vmf_status status = vmf_encoder_measurement(encoder, 0, &measurement);
 
-	/* Shortened version 15 contains no descriptors: all bytes are header. */
+	/* Shortened version 15 has no descriptors; all bytes are header. */
 	uint64_t actual_header = status == VMF_OK ?
 		measurement.header_octets : vmf_encoder_bit_count(encoder) / 8;
 
 	return header == actual_header &&
 	       (pdu == VMF_LENGTH_UNKNOWN || pdu == size);
+}
+
+static bool replay_output(const arguments *args, cli_clock *clock,
+	uint64_t timestamp, const bytes *output, uint64_t sent, size_t pdu)
+{
+	return cli_schedule(clock, timestamp, args->timed) &&
+	       wire_bytes(args, output->data, output->size, sent) &&
+	       write_stdout(output->data, output->size) &&
+	       summary(pdu, output->size);
 }
 
 static int replay(const arguments *args, const vmf_schema_set *schemas)
@@ -807,6 +902,8 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 		return 1;
 	}
 	bytes line = {}, output = {};
+	vmf_schema_set recorded = {};
+	vmf_message_schema *recorded_messages = nullptr;
 	vmf_encoder *encoder = nullptr;
 	const vmf_message_schema *active = nullptr;
 	cli_clock clock = {monotonic_now, sleep_until, nullptr, 0, 0, 0, false};
@@ -819,7 +916,7 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 	vmf_options options = {};
 
 	options.limits = vmf_default_limits();
-	options.schemas = schemas;
+	options.schemas = schemas && schemas->message_count ? schemas : nullptr;
 	for (;;) {
 		int read = read_line(file, &line);
 
@@ -842,10 +939,12 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 		yyjson_val *root = yyjson_doc_get_root(document);
 
 		if (line_number == 1) {
-			if (!metadata(root, &profile)) {
-				status = VMF_MALFORMED;
-			} else {
+			status = recorded_schemas(root, schemas, &profile,
+				&recorded, &recorded_messages);
+			if (status == VMF_OK) {
 				options.profile = profile;
+				options.schemas = recorded.message_count ?
+					&recorded : nullptr;
 				status = vmf_encoder_create(
 					&options, false, &encoder, nullptr);
 			}
@@ -854,7 +953,7 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 			vmf_event event = {};
 			uint64_t time_ns = 0;
 
-			status = cli_event_from_json(root, profile, schemas,
+			status = cli_event_from_json(root, profile, &recorded,
 				&active, &arena, &event, &time_ns);
 			if (status == VMF_OK && unsized_pending)
 				status = VMF_LENGTH_REQUIRED;
@@ -869,12 +968,13 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 					pdu_octets =
 						event.as.envelope.pdu_octets;
 					timestamp = time_ns;
-					bool unsized = unsized_header(
-						header_fields(profile,
-							event.as.envelope.header));
+					const auto *f = header_fields(
+						profile,
+						event.as.envelope.header);
+					bool unsized = unsized_header(f);
 
-					if (unsized !=
-						(pdu_octets == VMF_LENGTH_UNKNOWN))
+					if (unsized != (pdu_octets ==
+						VMF_LENGTH_UNKNOWN))
 						status = VMF_OUT_OF_RANGE;
 				}
 			} else if (status == VMF_OK &&
@@ -900,16 +1000,12 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 					status = VMF_OUT_OF_RANGE;
 				} else {
 					in_pdu = false;
-					unsized_pending =
-						pdu_octets == VMF_LENGTH_UNKNOWN;
+					unsized_pending = pdu_octets ==
+						VMF_LENGTH_UNKNOWN;
 					if (!unsized_pending) {
-						if (!cli_schedule(&clock,
-							timestamp, args->timed) ||
-							!wire_bytes(args, output.data,
-								output.size, sent) ||
-							!write_stdout(output.data,
-								output.size) ||
-							!summary(pdu, output.size))
+						if (!replay_output(args,
+							&clock, timestamp,
+							&output, sent, pdu))
 							status = VMF_ABORTED;
 						sent += output.size;
 						output.size = 0;
@@ -924,7 +1020,8 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 		if (status != VMF_OK) {
 			vmf_error error = vmf_encoder_error(encoder);
 
-			diagnostic("replay", status, &error, pdu, 0, line_number);
+			diagnostic("replay", status, &error, pdu, 0,
+				line_number);
 			result = 1;
 			break;
 		}
@@ -947,6 +1044,7 @@ static int replay(const arguments *args, const vmf_schema_set *schemas)
 	vmf_encoder_destroy(encoder);
 	free(line.data);
 	free(output.data);
+	free(recorded_messages);
 	return result;
 }
 
@@ -959,7 +1057,8 @@ int main(int argc, char **argv)
 #ifdef _WIN32
 	if (_setmode(_fileno(stdin), _O_BINARY) == -1 ||
 		_setmode(_fileno(stdout), _O_BINARY) == -1) {
-		fputs("vmf: cannot configure binary standard streams\n", stderr);
+		fputs("vmf: cannot configure binary standard streams\n",
+			stderr);
 		return 1;
 	}
 #else

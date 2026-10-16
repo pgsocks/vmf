@@ -90,6 +90,21 @@ check; grammar entries additionally specify exact field widths and positions.
 | S11 | C/D/D1 | An absent request group requires signed acknowledgment request zero. | 5.7.2.2.14 |
 | S12 | C/D/D1 | Signed acknowledgment request requires the request group present. | 5.7.2.2.15 |
 
+Native payload schemas select VMF (UMF 2) and one explicit registry profile.
+The core shares defaults and validation with the optional `vmf-schema/1` JSON
+adapter. Profiles do not infer a message-standard edition. Exact resolved
+identities distinguish absent values from present zero, and duplicate wire
+identities fail. A codec profile must agree with its registry.
+
+Ordered indexes and typed membership paths must establish contiguous,
+unambiguous scopes. Explicit FPI/GPI and FRI/GRI controls consume each control
+bit once; membership and one-bit width alone do not imply an indicator.
+Ordinary unsigned data defaults to widths 1–64 with independent LSB packing
+and significance. Signed representation, variable length, text modes and finite
+repeat bounds are explicit. Constants constrain supplied values rather than
+providing defaults. These are authoring rules and do not assert a complete
+MIL-STD-6017 message implementation.
+
 The codec also enforces the API's limits, exact schema identity, integer widths,
 dependency scope, event grammar and streaming ownership contracts. Those are
 library requirements rather than additional MIL-STD wire rules. Unknown SPI
