@@ -1,0 +1,10 @@
+@PACKAGE_INIT@
+
+include(CMakeFindDependencyMacro)
+if(@BUILD_SCHEMA_JSON@ OR @BUILD_HEADER_JSON@)
+	find_dependency(yyjson CONFIG)
+endif()
+include("${CMAKE_CURRENT_LIST_DIR}/vmf-targets.cmake")
+set(vmf_schema_json_FOUND @BUILD_SCHEMA_JSON@)
+set(vmf_header_json_FOUND @BUILD_HEADER_JSON@)
+check_required_components(vmf)

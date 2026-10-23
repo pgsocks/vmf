@@ -6,3 +6,5 @@ target_link_libraries(vmf_cli_support PUBLIC
 add_executable(vmf_cli main.cpp)
 set_target_properties(vmf_cli PROPERTIES OUTPUT_NAME vmf)
 target_link_libraries(vmf_cli PRIVATE vmf_cli_support)
+
+install(TARGETS vmf_cli RUNTIME DESTINATION "${CMAKE_INSTALL_BINDIR}")

@@ -61,8 +61,43 @@ configurations, serializes inspection metadata and generates minimal templates
 for exact message identities. The CLI uses this public implementation. Both
 companions use the same pinned yyjson dependency. Use the `core-only` preset
 to omit both companions and their JSON dependency.
-Installation rules are not yet provided. The shared installation prefix is
-`$HOME/.local`.
+
+# Install and consume
+
+Install the libraries, public headers, CMake package, enabled CLI, and pinned
+static yyjson dependency after building:
+
+```sh
+cmake --preset no-tests
+cmake --build --preset no-tests
+cmake --install build/no-tests
+```
+
+The shared prefix is `$HOME/.local`; `cmake --install build/no-tests --prefix
+/path/to/prefix` overrides it. The installed tree may be moved together. Set
+`CMAKE_PREFIX_PATH` to its current prefix when configuring a C11 or C++17
+consumer:
+
+```cmake
+cmake_minimum_required(VERSION 3.24)
+project(example LANGUAGES C)
+find_package(vmf REQUIRED CONFIG COMPONENTS schema_json header_json)
+add_executable(example main.c)
+set_property(TARGET example PROPERTY C_STANDARD 11)
+target_link_libraries(example PRIVATE
+    vmf::vmf vmf::schema_json vmf::header_json)
+```
+
+A C++17 consumer may select `LANGUAGES CXX`, a `.cpp` source, and
+`CXX_STANDARD 17`. Request only the JSON components needed by the application.
+Enabled companions are exported under their existing target names, and their
+package locates and links yyjson's separate archive transitively. A core-only
+consumer uses `find_package(vmf REQUIRED CONFIG)` and `vmf::vmf`.
+
+To install without either JSON companion, use `core-only` instead of `no-tests`
+in the commands above. Its installation has no yyjson dependency and no JSON
+component targets. A required component unavailable in an installation makes
+`find_package` fail. CPM source builds remain supported.
 
 # Documentation
 
