@@ -90,11 +90,27 @@ check; grammar entries additionally specify exact field widths and positions.
 | S11 | C/D/D1 | An absent request group requires signed acknowledgment request zero. | 5.7.2.2.14 |
 | S12 | C/D/D1 | Signed acknowledgment request requires the request group present. | 5.7.2.2.15 |
 
-Native payload schemas select VMF (UMF 2) and one explicit registry profile.
-The core shares defaults and validation with the optional `vmf-schema/1` JSON
-adapter. Profiles do not infer a message-standard edition. Exact resolved
-identities distinguish absent values from present zero, and duplicate wire
-identities fail. A codec profile must agree with its registry.
+Native payload schemas select VMF (UMF 2), independently of the envelope
+profile. A registry may supply an envelope default, including for existing
+callers, or omit it. With no default, native and `vmf-schema/1` JSON validation
+check semantic identities and payload definitions without choosing an envelope.
+The core supplies the same defaults and validation rules to both forms.
+
+The explicit codec profile maps named message-standard editions to wire
+identities and may differ from the registry default. Profiles never infer an
+edition. B omits its version field. A named edition must have a supported
+mapping in C/D/D1; D/D1 also reject an absent VMF version. Exact identities
+distinguish absent values from present zero. Unsupported mappings and duplicate
+wire identities fail, including semantic editions that collapse to one
+identity under B. Raw codes remain literal and restricted to the registry
+default when one is present; without a default, their values must be valid in
+the selected profile.
+
+`vmf_encoder_begin_schema_pdu` derives identities from canonical schemas and
+body presence from response metadata, then uses the ordinary managed begin
+validation and copying path. It preserves the other header metadata, makes
+no allocation and produces no output. Failures preserve usable state and
+completed measurements.
 
 Ordered indexes and typed membership paths must establish contiguous,
 unambiguous scopes. Explicit FPI/GPI and FRI/GRI controls consume each control

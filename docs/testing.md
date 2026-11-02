@@ -285,6 +285,18 @@ through a focused path. VMF product cases cover schemas, allocation, envelopes, 
 streaming, replay, measurement and failure outputs. Literal vectors live under
 `tests/acceptance/`; they are separate from infrastructure fixtures.
 
+Schema portability coverage loads one envelope-independent registry and
+encodes and decodes the same payload under B, C, D and D1 without changing its
+canonical message or index definitions. Native unit cases also check explicit
+profile overrides, neutral semantic validation, raw-code origin restrictions,
+unsupported mappings and identities that collapse under B. Managed begin
+coverage verifies identity derivation, copied header ownership, allocation-free
+operation and preserved measurements after a failed binding. Authoring and CLI
+cases exercise the same shared definitions across profiles; CLI replay checks
+that unrelated incompatible definitions do not block a compatible recorded
+subset and that ambiguous identities still fail. These synthetic checks do
+not extend the independent interoperability record below.
+
 As software targets are added under `src/`, link the software under test with
 `target_link_libraries(unit_tests PRIVATE your_library)` and
 `target_link_libraries(acceptance_steps PRIVATE your_library)`. Use public

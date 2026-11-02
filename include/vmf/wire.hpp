@@ -141,6 +141,14 @@ inline vmf_status schema_set_validate(const vmf_schema_set *set,
 	return ::vmf_schema_set_validate(set, limits, allocator, error);
 }
 
+inline vmf_status schema_set_validate_for_profile(const vmf_schema_set *set,
+	vmf_envelope_version profile, const vmf_limits *limits,
+	const vmf_allocator *allocator, vmf_error *error)
+{
+	return ::vmf_schema_set_validate_for_profile(set, profile, limits,
+		allocator, error);
+}
+
 inline vmf_status schema_message_id(const vmf_schema_set *set,
 	const vmf_message_schema *message, vmf_message_id *result)
 {
@@ -151,6 +159,20 @@ inline vmf_status schema_select(const vmf_schema_set *set,
 	const vmf_message_id *id, const vmf_message_schema **result)
 {
 	return ::vmf_schema_select(set, id, result);
+}
+
+inline vmf_status schema_message_id_for_profile(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_envelope_version profile,
+	vmf_message_id *result)
+{
+	return ::vmf_schema_message_id_for_profile(set, message, profile, result);
+}
+
+inline vmf_status schema_select_for_profile(const vmf_schema_set *set,
+	const vmf_message_id *id, vmf_envelope_version profile,
+	const vmf_message_schema **result)
+{
+	return ::vmf_schema_select_for_profile(set, id, profile, result);
 }
 
 inline const vmf_index_schema *schema_find(
@@ -255,6 +277,14 @@ inline vmf_status encoder_begin_pdu(
 	vmf_encoder *encoder, const vmf_envelope_event *envelope)
 {
 	return ::vmf_encoder_begin_pdu(encoder, envelope);
+}
+
+inline vmf_status encoder_begin_schema_pdu(vmf_encoder *encoder,
+	const void *header, const vmf_message_schema *const *schemas,
+	size_t schema_count)
+{
+	return ::vmf_encoder_begin_schema_pdu(encoder, header, schemas,
+		schema_count);
 }
 
 inline vmf_status encoder_next_request(vmf_encoder *encoder,

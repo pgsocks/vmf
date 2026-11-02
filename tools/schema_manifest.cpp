@@ -224,11 +224,13 @@ static yyjson_mut_val *index_definition(yyjson_mut_doc *doc,
 }
 
 static yyjson_mut_val *message_definition(yyjson_mut_doc *doc,
-	const vmf_schema_set *set, const vmf_message_schema *message)
+	const vmf_schema_set *set, const vmf_message_schema *message,
+	vmf_envelope_version profile)
 {
 	vmf_message_id id = {};
 
-	if (vmf_schema_message_id(set, message, &id) != VMF_OK)
+	if (vmf_schema_message_id_for_profile(set, message, profile, &id) !=
+		VMF_OK)
 		return nullptr;
 	yyjson_mut_val *object = yyjson_mut_obj(doc);
 	yyjson_mut_val *indexes = yyjson_mut_arr(doc);
@@ -388,13 +390,53 @@ yyjson_mut_doc *cli_metadata_to_json(cli_json *context,
 	for (size_t i = 0; valid && schemas && i < schemas->message_count; ++i)
 		valid = append(definitions,
 			message_definition(doc, schemas,
-				&schemas->messages[i]));
+				&schemas->messages[i], profile));
 	if (!valid || !add(doc, root, "schemas", definitions)) {
 		yyjson_mut_doc_free(doc);
 		return nullptr;
 	}
 	yyjson_mut_doc_set_root(doc, root);
 	return doc;
+}
+
+vmf_status cli_schema_select_compatible(const vmf_schema_set *schemas,
+	const vmf_message_id *id, vmf_envelope_version profile,
+	const vmf_message_schema **result)
+{
+	if (result)
+		*result = nullptr;
+	if (!schemas || !id || !result ||
+		(schemas->message_count && !schemas->messages))
+		return VMF_INVALID_ARGUMENT;
+	if (profile < VMF_ENVELOPE_B || profile > VMF_ENVELOPE_D1 ||
+		schemas->envelope < VMF_ENVELOPE_UNSPECIFIED ||
+		schemas->envelope > VMF_ENVELOPE_D1)
+		return VMF_INVALID_SCHEMA;
+	const vmf_message_schema *match = nullptr;
+	bool incompatible = false;
+
+	for (size_t i = 0; i < schemas->message_count; ++i) {
+		const auto *message = &schemas->messages[i];
+		vmf_message_id candidate = {};
+		vmf_status status = vmf_schema_message_id_for_profile(schemas,
+			message, profile, &candidate);
+
+		if (status == VMF_INVALID_SCHEMA) {
+			incompatible = true;
+			continue;
+		}
+		if (status != VMF_OK)
+			return status;
+		if (!vmf_message_id_equal(&candidate, id))
+			continue;
+		if (match)
+			return VMF_DUPLICATE_MESSAGE;
+		match = message;
+	}
+	if (!match)
+		return incompatible ? VMF_INVALID_SCHEMA : VMF_UNKNOWN_MESSAGE;
+	*result = match;
+	return VMF_OK;
 }
 
 vmf_status cli_metadata_from_json(yyjson_val *value,
@@ -416,8 +458,6 @@ vmf_status cli_metadata_from_json(yyjson_val *value,
 		!cli_profile_parse(yyjson_get_str(edition), &selected) ||
 		!yyjson_is_arr(definitions))
 		return VMF_MALFORMED;
-	if (schemas && schemas->envelope && schemas->envelope != selected)
-		return VMF_INVALID_SCHEMA;
 	if (yyjson_arr_size(definitions) > vmf_default_limits().max_schemas)
 		return VMF_LIMIT_EXCEEDED;
 	cli_json context;
@@ -451,13 +491,12 @@ vmf_status cli_metadata_from_json(yyjson_val *value,
 		}
 		if (status != VMF_OK)
 			break;
-		status = schemas ? vmf_schema_select(schemas, &id, &message) :
-			VMF_UNKNOWN_MESSAGE;
+		status = schemas ? cli_schema_select_compatible(schemas, &id,
+			selected, &message) : VMF_UNKNOWN_MESSAGE;
 		if (status != VMF_OK)
 			break;
 		yyjson_mut_val *canonical = message_definition(expected,
-			schemas,
-			message);
+			schemas, message, selected);
 		yyjson_mut_val *recorded =
 			yyjson_val_mut_copy(expected, definition);
 

@@ -56,6 +56,15 @@ Test dependencies are excluded from installation. The static target is
 yyjson 0.12.0. The core resolves profiles, defaults, scopes and controls for
 both native and JSON callers; JSON is optional. Payload definitions support
 VMF (UMF 2), while envelope inspection supports all documented formats.
+
+One immutable payload registry can serve compatible B/C/D/D1 envelopes.
+Choose the envelope in codec options; the registry's envelope is an optional
+default. Named payload editions map to the selected header's version codes.
+The managed encoder can derive descriptor identities from canonical schemas;
+see the [API guide](docs/api.md#schema-driven-encoding). Explicit raw version
+codes retain their profile restrictions, and unsupported or ambiguous
+identities are rejected when the registry is bound to an envelope.
+
 The optional `vmf::header_json` companion loads owned native envelope
 configurations, serializes inspection metadata and generates minimal templates
 for exact message identities. The CLI uses this public implementation. Both

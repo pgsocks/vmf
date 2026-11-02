@@ -29,6 +29,19 @@ profile constraint and conditional combination. It validates size presence
 using counting semantics; actual size numbers remain authoring/replay inputs.
 No actual assigned VMF payload layout is defined by this example.
 
+Payload schemas can be reused with independently selected compatible envelope
+profiles. Resolve an exact identity for a header with
+`vmf_schema_message_id_for_profile`, which maps named payload editions to that
+profile's codes and omits their version in B. Header JSON loading continues to
+validate the supplied identity and revision-specific metadata.
+
+For native managed encoding, `vmf_encoder_begin_schema_pdu` accepts one schema
+entry per header descriptor. Body entries reference canonical schemas, from
+which it derives UMF, functional area, message number, subtype and the version
+code for the encoder's profile. Other metadata and sizes are preserved and
+validated; caller inputs remain unchanged. Response-only entries may be NULL
+to preserve their supplied identities, or reference schemas to derive them.
+
 ## Optional properties and defaults
 
 Objects accept omitted optional members. Absence-controlled groups and spans

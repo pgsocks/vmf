@@ -54,6 +54,16 @@ yyjson_mut_doc *cli_metadata_to_json(cli_json *context,
 vmf_status cli_metadata_from_json(yyjson_val *value,
 	const vmf_schema_set *schemas, vmf_envelope_version *profile);
 
+/* Select an archive subset from a natively validated registry. Definitions
+ * without an identity under profile are skipped; exact duplicate matches
+ * still fail. All parameters are required and result clears on failure.
+ * No match returns INVALID_SCHEMA if any candidate was incompatible, or
+ * UNKNOWN_MESSAGE otherwise. No allocation; the result borrows schemas.
+ */
+vmf_status cli_schema_select_compatible(const vmf_schema_set *schemas,
+	const vmf_message_id *id, vmf_envelope_version profile,
+	const vmf_message_schema **result);
+
 /* Returned JSON owns copied event data. Caller frees the returned document. */
 yyjson_mut_doc *cli_event_to_json(cli_json *context,
 	const vmf_event *event, vmf_envelope_version profile, uint64_t time_ns);

@@ -405,4 +405,247 @@ THEN("^no schema owner is published and the second entry is diagnosed$")
 	EXPECT_EQ(0u, c->error.index_position);
 }
 
+struct portable_context {
+	vmf_schema_json_document *document = nullptr;
+	const vmf_schema_set *schemas = nullptr;
+	const vmf_message_schema *message = nullptr;
+	const vmf_index_schema *index = nullptr;
+	vmf_decoder *reader = nullptr;
+	vmf_encoder *writer = nullptr;
+	vmf_status status = VMF_OK;
+	std::vector<vmf_message_standard> editions;
+	size_t matching_envelopes = 0;
+	size_t requests = 0;
+
+	~portable_context()
+	{
+		vmf_decoder_destroy(reader);
+		vmf_encoder_destroy(writer);
+		vmf_schema_json_destroy(document);
+	}
+};
+
+GIVEN("^an envelope-independent JSON registry for "
+	"(MIL-STD-6017B|MIL-STD-6017E|two editions of the same message)$")
+{
+	REGEX_PARAM(std::string, definition);
+	cucumber::ScenarioScope<portable_context> c;
+	std::string edition = definition == "MIL-STD-6017E" ?
+		definition : "MIL-STD-6017B";
+	std::string message = "{\"message_number\":\"K01.1\","
+		"\"message_standard\":\"" + edition + "\",\"indexes\":[{"
+		"\"index_number\":\"1.\",\"number_of_bits\":8}]}";
+	std::string input = "{\"format\":\"vmf-schema/1\",\"messages\":[" +
+		message;
+
+	c->editions.push_back(edition == "MIL-STD-6017E" ?
+		VMF_STANDARD_6017E : VMF_STANDARD_6017B);
+	if (definition == "two editions of the same message") {
+		input += ",{\"message_number\":\"K01.1\","
+			"\"message_standard\":\"MIL-STD-6017C\",\"indexes\":[{"
+			"\"index_number\":\"1.\",\"number_of_bits\":8}]}";
+		c->editions.push_back(VMF_STANDARD_6017C);
+	}
+	input += "]}";
+	auto options = vmf_schema_json_default_options();
+	vmf_schema_json_error error = {};
+
+	ASSERT_EQ(VMF_OK, vmf_schema_json_load(input.data(), input.size(),
+		&options, &c->document, &error));
+	c->schemas = vmf_schema_json_schemas(c->document);
+	ASSERT_NE(nullptr, c->schemas);
+	ASSERT_EQ(c->editions.size(), c->schemas->message_count);
+	c->message = c->schemas->messages;
+	c->index = c->message->indexes;
+	input.assign(input.size(), 'x');
+}
+
+static vmf_event_action portable_value(void *user,
+	const vmf_encode_request *request, vmf_encode_reply *reply)
+{
+	auto *c = static_cast<portable_context *>(user);
+
+	++c->requests;
+	if (request->kind != VMF_ENCODE_REQUEST_FIELD ||
+		request->schema != c->message || request->index != c->index ||
+		request->field_kind != VMF_FIELD_UNSIGNED)
+		return VMF_EVENT_ABORT;
+	reply->kind = VMF_ENCODE_REQUEST_FIELD;
+	reply->as.field.unsigned_integer.value = 0x5a;
+	return VMF_EVENT_CONTINUE;
+}
+
+static void portable_roundtrip(portable_context *c,
+	vmf_envelope_version profile)
+{
+	vmf_message_header message = {};
+	vmf_header_fields fields = {};
+	vmf_header header = {};
+
+	message.message_size_octets = {true, 1};
+	message.precedence = profile <= VMF_ENVELOPE_C ? 7 : 0;
+	fields.messages = &message;
+	fields.message_count = 1;
+	switch (profile) {
+	case VMF_ENVELOPE_B:
+		header.b = {fields};
+		break;
+	case VMF_ENVELOPE_C:
+		header.c = {fields, false};
+		break;
+	case VMF_ENVELOPE_D:
+		header.d = {fields, false};
+		break;
+	case VMF_ENVELOPE_D1:
+		header.d1 = {fields, false};
+		break;
+	default:
+		FAIL() << "unsupported test profile";
+	}
+	vmf_options options = vmf_options_for_schemas(c->schemas);
+
+	options.profile = profile;
+	const vmf_message_schema *bindings[] = {c->message};
+
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_create(&options, false, &c->writer, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_encoder_begin_schema_pdu(c->writer, &header,
+		bindings, 1));
+	EXPECT_EQ(0u, message.id.user_message_format);
+	EXPECT_FALSE(message.id.identification_present);
+	EXPECT_FALSE(message.has_body);
+	std::vector<uint8_t> wire;
+	size_t before = c->requests;
+	vmf_status status = VMF_OK;
+
+	for (size_t attempt = 0; attempt < 128; ++attempt) {
+		uint8_t byte = 0;
+		vmf_output output = {&byte, 1, 0};
+		size_t delivered = 0;
+
+		status = vmf_encoder_dispatch(c->writer, &output,
+			portable_value, c, &delivered);
+		if (output.used)
+			wire.push_back(byte);
+		if (status != VMF_NEED_OUTPUT)
+			break;
+	}
+	ASSERT_EQ(VMF_DONE, status);
+	ASSERT_FALSE(wire.empty());
+	EXPECT_EQ(static_cast<unsigned>(profile), wire.front() & 0x0fu);
+	EXPECT_EQ(0x5au, wire.back());
+	EXPECT_EQ(before + 1, c->requests);
+	vmf_encoder_destroy(c->writer);
+	c->writer = nullptr;
+	ASSERT_EQ(VMF_OK,
+		vmf_decoder_create(&options, &c->reader, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(c->reader));
+	vmf_input input = {wire.data(), wire.size(), 0, true};
+	size_t header_count = 0;
+	size_t field_count = 0;
+	size_t begin_count = 0;
+
+	for (size_t attempt = 0; attempt < 32; ++attempt) {
+		vmf_event event = {};
+
+		status = vmf_decoder_next(c->reader, &input, &event);
+		if (status != VMF_OK)
+			break;
+		if (event.kind == VMF_EVENT_ENVELOPE) {
+			++header_count;
+			EXPECT_EQ(profile, event.as.envelope.wire_version);
+		} else if (event.kind == VMF_EVENT_MESSAGE_BEGIN) {
+			++begin_count;
+			EXPECT_EQ(c->message, event.schema);
+			const auto &id = event.as.message.id;
+
+			EXPECT_EQ(2u, id.user_message_format);
+			EXPECT_EQ(1u, id.functional_area);
+			EXPECT_EQ(1u, id.message_number);
+			EXPECT_EQ(profile != VMF_ENVELOPE_B,
+				id.standard_version.present);
+			if (id.standard_version.present)
+				EXPECT_EQ(profile == VMF_ENVELOPE_C ? 8u : 7u,
+					id.standard_version.value);
+		} else if (event.kind == VMF_EVENT_FIELD) {
+			++field_count;
+			EXPECT_EQ(c->message, event.schema);
+			EXPECT_EQ(c->index, event.index);
+			EXPECT_EQ(VMF_FIELD_UNSIGNED, event.field_kind);
+			EXPECT_EQ(0x5au,
+				event.as.field.value.unsigned_integer.value);
+		}
+	}
+	EXPECT_EQ(VMF_DONE, status);
+	EXPECT_EQ(wire.size(), input.used);
+	EXPECT_EQ(1u, header_count);
+	EXPECT_EQ(1u, begin_count);
+	EXPECT_EQ(1u, field_count);
+	if (status == VMF_DONE && header_count == 1 && begin_count == 1 &&
+		field_count == 1)
+		++c->matching_envelopes;
+	vmf_decoder_destroy(c->reader);
+	c->reader = nullptr;
+}
+
+WHEN("^I encode and decode the same payload with B, C, D and D1 envelopes$")
+{
+	cucumber::ScenarioScope<portable_context> c;
+
+	for (unsigned p = VMF_ENVELOPE_B; p <= VMF_ENVELOPE_D1; ++p) {
+		SCOPED_TRACE(p);
+		portable_roundtrip(c.get(), static_cast<vmf_envelope_version>(p));
+		ASSERT_FALSE(::testing::Test::HasFatalFailure());
+	}
+}
+
+static void unchanged_registry(const portable_context *c)
+{
+	ASSERT_EQ(c->schemas, vmf_schema_json_schemas(c->document));
+	EXPECT_EQ(VMF_ENVELOPE_UNSPECIFIED, c->schemas->envelope);
+	EXPECT_EQ(VMF_STANDARD_INHERIT, c->schemas->standard.kind);
+	ASSERT_EQ(c->message, c->schemas->messages);
+	ASSERT_EQ(c->editions.size(), c->schemas->message_count);
+	for (size_t i = 0; i < c->editions.size(); ++i) {
+		const auto *message = &c->schemas->messages[i];
+
+		EXPECT_EQ(VMF_STANDARD_EDITION, message->standard.kind);
+		EXPECT_EQ(c->editions[i], message->standard.as.edition);
+		EXPECT_EQ(1u, message->index_count);
+		EXPECT_EQ(8u, message->indexes[0].number_of_bits);
+	}
+	EXPECT_EQ(c->index, c->message->indexes);
+}
+
+THEN("^every envelope carries the same payload using the unchanged registry$")
+{
+	cucumber::ScenarioScope<portable_context> c;
+
+	EXPECT_EQ(4u, c->matching_envelopes);
+	EXPECT_EQ(4u, c->requests);
+	unchanged_registry(c.get());
+}
+
+WHEN("^I bind that registry to envelope (B|C)$")
+{
+	REGEX_PARAM(std::string, envelope);
+	cucumber::ScenarioScope<portable_context> c;
+	vmf_options options = vmf_options_for_schemas(c->schemas);
+
+	options.profile = envelope == "B" ? VMF_ENVELOPE_B : VMF_ENVELOPE_C;
+	c->status = vmf_decoder_create(&options, &c->reader, nullptr);
+}
+
+THEN("^binding fails with (invalid_schema|duplicate_message) "
+	"without changing the registry$")
+{
+	REGEX_PARAM(std::string, status);
+	cucumber::ScenarioScope<portable_context> c;
+
+	EXPECT_EQ(status == "invalid_schema" ? VMF_INVALID_SCHEMA :
+		VMF_DUPLICATE_MESSAGE, c->status);
+	EXPECT_EQ(nullptr, c->reader);
+	unchanged_registry(c.get());
+}
+
 } /* namespace */

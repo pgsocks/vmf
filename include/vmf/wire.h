@@ -315,8 +315,11 @@ typedef struct vmf_repeat_path {
 	size_t count;
 } vmf_repeat_path;
 
-/* Explicit profile; shortened on-wire version 15 is not a profile. */
+/* Explicit profiles; shortened on-wire version 15 is not a profile.
+ * UNSPECIFIED is allowed only as a schema registry's omitted default.
+ */
 typedef enum vmf_envelope_version {
+	VMF_ENVELOPE_UNSPECIFIED = 0,
 	VMF_ENVELOPE_B = 1,
 	VMF_ENVELOPE_C = 2,
 	VMF_ENVELOPE_D = 3,
@@ -498,7 +501,12 @@ typedef struct vmf_message_schema {
 	vmf_bit_order octet_order;
 } vmf_message_schema;
 
-/* Immutable borrowed registry; all nested arrays/strings outlive its codecs. */
+/* Immutable borrowed registry; all nested arrays/strings outlive its codecs.
+ * envelope is an optional default for convenience helpers, not a binding for
+ * semantic editions. Explicit codec/helper profiles select their wire mapping.
+ * Raw standard codes with a default profile remain bound to that profile;
+ * without a default they are interpreted literally in the selected profile.
+ */
 typedef struct vmf_schema_set {
 	vmf_envelope_version envelope;
 	const vmf_message_schema *messages;
@@ -549,6 +557,9 @@ typedef struct vmf_allocator vmf_allocator;
  * NULL allocator selects malloc/free; paired callbacks follow codec rules.
  * Validation uses bounded temporary storage, retains nothing and changes no
  * descriptor. Single-message validation includes registry defaults/context.
+ * The ordinary helpers use the registry default. With UNSPECIFIED, validation
+ * checks semantic identities and body definitions without choosing a profile;
+ * it does not guarantee that a particular envelope can carry the registry.
  */
 vmf_status vmf_schema_validate(const vmf_schema_set *set,
 	const vmf_message_schema *message, const vmf_limits *limits,
@@ -556,6 +567,14 @@ vmf_status vmf_schema_validate(const vmf_schema_set *set,
 vmf_status vmf_schema_set_validate(const vmf_schema_set *set,
 	const vmf_limits *limits, const vmf_allocator *allocator,
 	vmf_error *error);
+/* Validate for one explicit B/C/D/D1 profile, independently of the registry
+ * default. Checks its version mappings and collisions, including editions
+ * that become indistinguishable under B. Arguments follow set_validate.
+ * Invalid/unspecified profile returns INVALID_SCHEMA with property PROFILE.
+ */
+vmf_status vmf_schema_set_validate_for_profile(const vmf_schema_set *set,
+	vmf_envelope_version profile, const vmf_limits *limits,
+	const vmf_allocator *allocator, vmf_error *error);
 
 /* Exact identity; absent values never mean wildcard/latest. Equality requires
  * two non-NULL structurally valid identities and ignores absent value storage.
@@ -563,12 +582,26 @@ vmf_status vmf_schema_set_validate(const vmf_schema_set *set,
 bool vmf_message_id_equal(const vmf_message_id *a, const vmf_message_id *b);
 /* Resolve a member of set; arguments are mandatory, result clears on failure.
  * No allocation. Invalid selection/layout identity returns INVALID_SCHEMA.
+ * The ordinary helper requires a B/C/D/D1 registry default; an unspecified
+ * default returns INVALID_SCHEMA. The explicit helper ignores that default
+ * for semantic editions, maps them to profile, and omits their version in B.
+ * Raw codes remain literal and profile-bound when a default is present.
+ * Absent versions are never inferred; D/D1 require a VMF version.
  */
 vmf_status vmf_schema_message_id(const vmf_schema_set *set,
 	const vmf_message_schema *message, vmf_message_id *result);
-/* Select from a validated set. result is mandatory and cleared on failure. */
+vmf_status vmf_schema_message_id_for_profile(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_envelope_version profile,
+	vmf_message_id *result);
+/* Select from a set validated for the selected profile. result is mandatory
+ * and cleared on failure. The ordinary helper requires a registry default;
+ * the explicit helper uses profile according to message_id_for_profile.
+ */
 vmf_status vmf_schema_select(const vmf_schema_set *set,
 	const vmf_message_id *id, const vmf_message_schema **result);
+vmf_status vmf_schema_select_for_profile(const vmf_schema_set *set,
+	const vmf_message_id *id, vmf_envelope_version profile,
+	const vmf_message_schema **result);
 /* Native lookups require a validated message; NULL/missing returns NULL. */
 const vmf_index_schema *vmf_schema_find(const vmf_message_schema *message,
 	vmf_index_number number);
@@ -910,7 +943,9 @@ struct vmf_allocator {
 
 /* Mandatory limits, explicit profile and optional immutable schemas/allocator.
  * schemas==NULL means an empty set, permitting independent envelope work.
- * Creation validates schemas, checks size arithmetic, allocates bounded state
+ * profile selects the envelope and maps semantic schema identities, even when
+ * the registry has a different default. Creation validates schemas for that
+ * profile, checks size arithmetic, allocates bounded state
  * and copies options. It releases every partial allocation on failure.
  * result is mandatory and set NULL on failure; error is optional and always
  * set. Allocation failure -> OUT_OF_MEMORY. No allocation after creation.
@@ -921,8 +956,10 @@ typedef struct vmf_options {
 	const vmf_schema_set *schemas;
 	const vmf_allocator *allocator;
 } vmf_options;
-/* Borrow schemas and select its profile with default limits/allocator.
+/* Borrow schemas and select its default profile with default limits/allocator.
  * schemas is mandatory. This allocates nothing; creation still validates.
+ * Set options.profile explicitly before creation if the default is unspecified
+ * or a different supported envelope is desired.
  */
 vmf_options vmf_options_for_schemas(const vmf_schema_set *schemas);
 vmf_status vmf_decoder_create(
@@ -1010,6 +1047,20 @@ typedef vmf_event_action (*vmf_encode_provider)(void *user,
  */
 vmf_status vmf_encoder_begin_pdu(
 	vmf_encoder *encoder, const vmf_envelope_event *envelope);
+
+/* Begin a managed PDU with identities derived from canonical schemas and the
+ * encoder's profile. header is the selected native revision struct; its
+ * message_count must equal schema_count (1..16). schemas has one entry per
+ * descriptor: a member of the encoder's registry, or NULL for a response-only
+ * descriptor whose supplied identity is preserved. Body descriptors require
+ * a schema. Identity and has_body are derived; other metadata and sizes are
+ * preserved and validated as by begin_pdu. Inputs are required and unchanged.
+ * Copies all header pointees before returning. No allocation or output.
+ * State, lifetime and transactional failure rules are those of begin_pdu.
+ */
+vmf_status vmf_encoder_begin_schema_pdu(vmf_encoder *encoder,
+	const void *header, const vmf_message_schema *const *schemas,
+	size_t schema_count);
 
 /* Advance managed traversal, generating structure, controls and padding.
  * OK returns one request. Before responding, repeated calls return the same

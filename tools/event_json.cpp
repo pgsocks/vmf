@@ -567,8 +567,8 @@ vmf_status cli_event_from_json(yyjson_val *value,
 				&candidate.as.message.payload_octets, true))
 			return VMF_MALFORMED;
 		candidate.as.message.index = static_cast<size_t>(numeric);
-		vmf_status status = vmf_schema_select(schemas,
-			&candidate.as.message.id, &candidate.schema);
+		vmf_status status = vmf_schema_select_for_profile(schemas,
+			&candidate.as.message.id, profile, &candidate.schema);
 
 		if (status != VMF_OK)
 			return status;

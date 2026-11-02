@@ -581,4 +581,67 @@ TEST(Author, AuthorsAllFourEnvelopeProfiles)
 	}
 }
 
+TEST(Author, SharesOneSemanticRegistryAcrossAllEnvelopeProfiles)
+{
+	author_fixture f;
+
+	f.source.set.standard.kind = VMF_STANDARD_EDITION;
+	f.source.set.standard.as.edition = VMF_STANDARD_6017B;
+	for (auto profile : {VMF_ENVELOPE_B, VMF_ENVELOPE_C,
+		VMF_ENVELOPE_D, VMF_ENVELOPE_D1}) {
+		SCOPED_TRACE(profile);
+		vmf_header header = {};
+		vmf_message_header message = f.source.message;
+
+		ASSERT_EQ(VMF_OK, vmf_schema_message_id_for_profile(
+			&f.source.set, &f.source.schema, profile, &message.id));
+		message.precedence = profile <= VMF_ENVELOPE_C ? 7 : 0;
+		header.b.fields.messages = &message;
+		header.b.fields.message_count = 1;
+		f.source.envelope = {static_cast<uint8_t>(profile), &header,
+			vmf_header_layout(profile).size, VMF_LENGTH_UNKNOWN,
+			VMF_LENGTH_UNKNOWN};
+		f.options.codec.profile = profile;
+		ASSERT_EQ(VMF_OK, vmf_author_validate_header(&f.options,
+			&f.source.envelope, &f.error));
+		ASSERT_EQ(VMF_OK, f.encode());
+		const uint8_t *bytes = vmf_author_result_data(f.result);
+		size_t size = vmf_author_result_size(f.result);
+
+		ASSERT_GE(size, 4u);
+		EXPECT_EQ(profile, bytes[0] & 0xf);
+		EXPECT_EQ(0, std::memcmp(bytes + size - 4, f.source.rows, 4));
+		vmf_decoder *reader = nullptr;
+
+		ASSERT_EQ(VMF_OK, vmf_decoder_create(&f.options.codec,
+			&reader, nullptr));
+		ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(reader));
+		vmf_input input = {bytes, size, 0, true};
+		vmf_status status = VMF_OK;
+		size_t fields = 0;
+
+		for (size_t attempt = 0; attempt < 64; ++attempt) {
+			vmf_event event = {};
+
+			status = vmf_decoder_next(reader, &input, &event);
+			if (status != VMF_OK)
+				break;
+			if (event.kind != VMF_EVENT_FIELD)
+				continue;
+			EXPECT_EQ(&f.source.schema, event.schema);
+			EXPECT_EQ(&f.source.index, event.index);
+			++fields;
+		}
+		EXPECT_EQ(VMF_DONE, status);
+		EXPECT_EQ(4u, fields);
+		vmf_decoder_destroy(reader);
+		EXPECT_EQ(VMF_ENVELOPE_D1, f.source.set.envelope);
+		EXPECT_EQ(VMF_STANDARD_EDITION, f.source.set.standard.kind);
+		EXPECT_EQ(VMF_STANDARD_6017B,
+			f.source.set.standard.as.edition);
+		vmf_author_result_destroy(f.result);
+		f.result = nullptr;
+	}
+}
+
 } /* namespace */

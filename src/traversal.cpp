@@ -719,6 +719,52 @@ vmf_status vmf_encoder_begin_pdu(vmf_encoder *encoder,
 	return VMF_OK;
 }
 
+vmf_status vmf_encoder_begin_schema_pdu(vmf_encoder *encoder,
+	const void *header, const vmf_message_schema *const *schemas,
+	size_t schema_count)
+{
+	if (!encoder || !header || !schemas || !schema_count ||
+		schema_count > 16)
+		return managed_argument(encoder, VMF_INVALID_ARGUMENT);
+	if (encoder->phase != ENCODER_IDLE && encoder->phase != ENCODER_DONE)
+		return managed_argument(encoder, VMF_INVALID_STATE);
+	auto profile = encoder->config.profile;
+	vmf_layout layout = vmf_header_layout(static_cast<uint8_t>(profile));
+	vmf_header native = {};
+
+	std::memcpy(&native, header, layout.size);
+	/* All native revisions share these leading fields. */
+	auto *metadata = &native.b.fields;
+
+	if (metadata->message_count != schema_count || !metadata->messages)
+		return managed_argument(encoder, VMF_INVALID_ARGUMENT);
+	vmf_message_header messages[16] = {};
+
+	for (size_t i = 0; i < schema_count; ++i) {
+		messages[i] = metadata->messages[i];
+		messages[i].has_body = !messages[i].response.present;
+		vmf_status status = VMF_OK;
+
+		if (schemas[i])
+			status = vmf_schema_message_id_for_profile(
+				encoder->config.schemas, schemas[i], profile,
+				&messages[i].id);
+		else if (messages[i].has_body)
+			status = VMF_INVALID_ARGUMENT;
+		if (status != VMF_OK) {
+			encoder->error = make_error(status);
+			encoder->error.message_index = i;
+			encoder->error.property = VMF_PROPERTY_IDENTITY;
+			return status;
+		}
+	}
+	metadata->messages = messages;
+	vmf_envelope_event envelope = {static_cast<uint8_t>(profile), &native,
+		layout.size, VMF_LENGTH_UNKNOWN, VMF_LENGTH_UNKNOWN};
+
+	return vmf_encoder_begin_pdu(encoder, &envelope);
+}
+
 static vmf_status managed_progress(vmf_encoder *encoder, uint64_t before,
 	uint64_t events, vmf_status status)
 {

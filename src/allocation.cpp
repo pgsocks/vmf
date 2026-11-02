@@ -71,15 +71,10 @@ static vmf_status configure(const vmf_options *options, configuration *config,
 		return VMF_LIMIT_EXCEEDED;
 	*storage_size =
 		limits->max_header_bytes * 2 + *payload_size + alignment;
-	if (config->schemas && config->schemas->envelope != config->profile) {
-		if (error)
-			error->property = VMF_PROPERTY_PROFILE;
-		return VMF_INVALID_SCHEMA;
-	}
 	if (!config->schemas)
 		return VMF_OK;
-	return normalize_schemas(config->schemas, limits, &config->allocator,
-		&config->resolved, error);
+	return normalize_schemas(config->schemas, config->profile, limits,
+		&config->allocator, &config->resolved, error);
 }
 
 static bool aligned(void *memory)

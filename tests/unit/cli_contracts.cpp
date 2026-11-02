@@ -722,6 +722,144 @@ TEST(CliJson, ArchiveManifestsResolveDefaultsAndRejectChangedDefinitions)
 	EXPECT_EQ(0u, context.used);
 }
 
+TEST(CliJson, SharedSemanticSchemasFollowArchiveAndEventProfiles)
+{
+	cli_fixture fixture;
+
+	fixture.schemas.envelope = VMF_ENVELOPE_C;
+	fixture.schemas.standard.kind = VMF_STANDARD_EDITION;
+	fixture.schemas.standard.as.edition = VMF_STANDARD_6017B;
+	for (auto profile : {VMF_ENVELOPE_B, VMF_ENVELOPE_C,
+		     VMF_ENVELOPE_D, VMF_ENVELOPE_D1}) {
+		SCOPED_TRACE(profile);
+		cli_json context;
+
+		cli_json_init(&context);
+		yyjson_mut_doc *metadata = cli_metadata_to_json(&context,
+			profile, &fixture.schemas);
+
+		ASSERT_NE(nullptr, metadata);
+		yyjson_doc *input = yyjson_mut_doc_imut_copy(metadata, nullptr);
+
+		ASSERT_NE(nullptr, input);
+		auto *root = yyjson_doc_get_root(input);
+		auto *definition = yyjson_arr_get(
+			yyjson_obj_get(root, "schemas"), 0);
+		vmf_message_id id = {};
+
+		ASSERT_TRUE(cli_id_from_json(
+			yyjson_obj_get(definition, "id"), &id));
+		EXPECT_EQ(profile != VMF_ENVELOPE_B,
+			id.standard_version.present);
+		if (id.standard_version.present)
+			EXPECT_EQ(profile == VMF_ENVELOPE_C ? 8 : 7,
+				id.standard_version.value);
+		vmf_envelope_version selected = VMF_ENVELOPE_C;
+
+		EXPECT_EQ(VMF_OK,
+			cli_metadata_from_json(root, &fixture.schemas, &selected));
+		EXPECT_EQ(profile, selected);
+		yyjson_doc_free(input);
+		yyjson_mut_doc_free(metadata);
+		vmf_event source = {}, decoded = {};
+
+		source.kind = VMF_EVENT_MESSAGE_BEGIN;
+		source.schema = &fixture.schema;
+		source.as.message.id = {2, {profile != VMF_ENVELOPE_B,
+			static_cast<uint8_t>(profile == VMF_ENVELOPE_C ? 8 : 7)},
+			true, 1, 1, {}};
+		source.as.message.payload_octets = 8;
+		EXPECT_EQ(VMF_OK,
+			round_trip(&fixture, &source, &decoded, profile));
+		EXPECT_EQ(&fixture.schema, decoded.schema);
+		EXPECT_EQ(VMF_ENVELOPE_C, fixture.schemas.envelope);
+		EXPECT_EQ(VMF_STANDARD_EDITION, fixture.schemas.standard.kind);
+	}
+}
+
+TEST(CliJson, ArchiveIgnoresUnrelatedSchemasWithoutTargetVersion)
+{
+	cli_fixture fixture;
+
+	fixture.schemas.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	fixture.schemas.standard.kind = VMF_STANDARD_EDITION;
+	fixture.schemas.standard.as.edition = VMF_STANDARD_6017B;
+	cli_json context;
+
+	cli_json_init(&context);
+	yyjson_mut_doc *metadata = cli_metadata_to_json(&context,
+		VMF_ENVELOPE_D1, &fixture.schemas);
+
+	ASSERT_NE(nullptr, metadata);
+	yyjson_doc *input = yyjson_mut_doc_imut_copy(metadata, nullptr);
+
+	ASSERT_NE(nullptr, input);
+	vmf_message_schema messages[] = {fixture.schema, fixture.schema};
+	vmf_schema_set available = fixture.schemas;
+
+	messages[1].message_number.number = 2;
+	messages[1].standard.kind = VMF_STANDARD_EDITION;
+	messages[1].standard.as.edition = VMF_STANDARD_TIDP_TE_R7;
+	available.messages = messages;
+	available.message_count = 2;
+	vmf_envelope_version profile = VMF_ENVELOPE_B;
+
+	EXPECT_EQ(VMF_OK, cli_metadata_from_json(yyjson_doc_get_root(input),
+		&available, &profile));
+	EXPECT_EQ(VMF_ENVELOPE_D1, profile);
+	auto limits = vmf_default_limits();
+
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_set_validate_for_profile(
+		&available, VMF_ENVELOPE_D1, &limits, nullptr, nullptr));
+	yyjson_doc_free(input);
+	yyjson_mut_doc_free(metadata);
+	EXPECT_EQ(0u, context.used);
+}
+
+TEST(CliJson, ArchiveSubsetSelectionRetainsFailureAndDuplicateContracts)
+{
+	cli_fixture fixture;
+
+	fixture.schemas.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	fixture.schemas.standard.kind = VMF_STANDARD_EDITION;
+	fixture.schemas.standard.as.edition = VMF_STANDARD_6017B;
+	vmf_message_id id = {2, {true, 7}, true, 1, 1, {}};
+	const vmf_message_schema *selected = &fixture.schema;
+
+	EXPECT_EQ(VMF_INVALID_ARGUMENT, cli_schema_select_compatible(nullptr,
+		&id, VMF_ENVELOPE_D1, &selected));
+	EXPECT_EQ(nullptr, selected);
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		cli_schema_select_compatible(&fixture.schemas, nullptr,
+			VMF_ENVELOPE_D1, &selected));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		cli_schema_select_compatible(&fixture.schemas, &id,
+			VMF_ENVELOPE_D1, nullptr));
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		cli_schema_select_compatible(&fixture.schemas, &id,
+			VMF_ENVELOPE_UNSPECIFIED, &selected));
+	EXPECT_EQ(nullptr, selected);
+	id.message_number = 2;
+	EXPECT_EQ(VMF_UNKNOWN_MESSAGE,
+		cli_schema_select_compatible(&fixture.schemas, &id,
+			VMF_ENVELOPE_D1, &selected));
+	EXPECT_EQ(nullptr, selected);
+	vmf_message_schema messages[] = {fixture.schema, fixture.schema,
+		fixture.schema};
+
+	messages[0].standard.kind = VMF_STANDARD_EDITION;
+	messages[0].standard.as.edition = VMF_STANDARD_TIDP_TE_R7;
+	messages[1].standard.kind = VMF_STANDARD_RAW_CODE;
+	messages[1].standard.as.raw_code = 7;
+	fixture.schemas.messages = messages;
+	fixture.schemas.message_count = 3;
+	id.message_number = 1;
+	EXPECT_EQ(VMF_DUPLICATE_MESSAGE,
+		cli_schema_select_compatible(&fixture.schemas, &id,
+			VMF_ENVELOPE_D1, &selected));
+	EXPECT_EQ(nullptr, selected);
+}
+
 TEST(CliJson, ArchiveRejectsUnsupportedVersionsAndAcceptsUnrelatedMessages)
 {
 	cli_fixture fixture;

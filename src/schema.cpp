@@ -1045,28 +1045,74 @@ bool vmf_internal::message_version_valid(vmf_envelope_version profile,
 	}
 }
 
-vmf_status vmf_schema_message_id(const vmf_schema_set *set,
-	const vmf_message_schema *message, vmf_message_id *result)
+static vmf_standard_selection selected_standard(const vmf_schema_set *set,
+	const vmf_message_schema *message)
+{
+	vmf_standard_selection selection = message->standard.kind ==
+		VMF_STANDARD_INHERIT ? set->standard : message->standard;
+
+	if (selection.kind == VMF_STANDARD_INHERIT)
+		selection.kind = VMF_STANDARD_ABSENT;
+	return selection;
+}
+
+static bool standard_valid(vmf_standard_selection selection)
+{
+	switch (selection.kind) {
+	case VMF_STANDARD_INHERIT:
+	case VMF_STANDARD_ABSENT:
+		return true;
+	case VMF_STANDARD_EDITION:
+		return selection.as.edition >= VMF_STANDARD_6017 &&
+			selection.as.edition <= VMF_STANDARD_TIDP_FTE_R6;
+	case VMF_STANDARD_RAW_CODE:
+		return selection.as.raw_code <= 10;
+	default:
+		return false;
+	}
+}
+
+static bool standard_equal(vmf_standard_selection a,
+	vmf_standard_selection b)
+{
+	if (a.kind != b.kind)
+		return false;
+	if (a.kind == VMF_STANDARD_EDITION)
+		return a.as.edition == b.as.edition;
+	if (a.kind == VMF_STANDARD_RAW_CODE)
+		return a.as.raw_code == b.as.raw_code;
+	return true;
+}
+
+static vmf_status schema_identity(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_envelope_version profile,
+	vmf_message_id *result)
 {
 	if (result)
 		*result = {};
 	if (!result || !member(set, message))
 		return VMF_INVALID_ARGUMENT;
-	if (set->envelope < VMF_ENVELOPE_B || set->envelope > VMF_ENVELOPE_D1 ||
+	if (set->envelope < VMF_ENVELOPE_UNSPECIFIED ||
+		set->envelope > VMF_ENVELOPE_D1 ||
+		profile < VMF_ENVELOPE_UNSPECIFIED || profile > VMF_ENVELOPE_D1 ||
 		message->message_number.functional_area > 10 ||
 		!message->message_number.number ||
 			message->message_number.number > 127 ||
 		(message->subtype.present && message->subtype.value > 127))
 		return VMF_INVALID_SCHEMA;
-	vmf_standard_selection selection = message->standard.kind ==
-		VMF_STANDARD_INHERIT ? set->standard : message->standard;
+	vmf_standard_selection selection = selected_standard(set, message);
+	if (!standard_valid(selection))
+		return VMF_INVALID_SCHEMA;
 	vmf_message_id id = {2, {}, true,
 		message->message_number.functional_area,
 		message->message_number.number, message->subtype};
 	if (selection.kind == VMF_STANDARD_RAW_CODE) {
+		if (profile && set->envelope && set->envelope != profile)
+			return VMF_INVALID_SCHEMA;
 		id.standard_version = {true, selection.as.raw_code};
-	} else if (selection.kind == VMF_STANDARD_EDITION) {
-		bool c = set->envelope == VMF_ENVELOPE_C;
+	} else if (selection.kind == VMF_STANDARD_EDITION &&
+		profile != VMF_ENVELOPE_UNSPECIFIED && profile != VMF_ENVELOPE_B) {
+		bool c = profile == VMF_ENVELOPE_C;
 		int code = -1;
 		switch (selection.as.edition) {
 		case VMF_STANDARD_6017:
@@ -1112,28 +1158,50 @@ vmf_status vmf_schema_message_id(const vmf_schema_set *set,
 		if (code < 0)
 			return VMF_INVALID_SCHEMA;
 		id.standard_version = {true, (uint8_t)code};
-	} else if (selection.kind != VMF_STANDARD_INHERIT &&
-		selection.kind != VMF_STANDARD_ABSENT) {
-		return VMF_INVALID_SCHEMA;
 	}
-	if (!vmf_internal::message_version_valid(set->envelope, &id))
+	if (profile && !vmf_internal::message_version_valid(profile, &id))
 		return VMF_INVALID_SCHEMA;
 	*result = id;
 	return VMF_OK;
 }
 
-vmf_status vmf_schema_select(const vmf_schema_set *set,
-	const vmf_message_id *id, const vmf_message_schema **result)
+vmf_status vmf_schema_message_id_for_profile(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_envelope_version profile,
+	vmf_message_id *result)
+{
+	if (result)
+		*result = {};
+	if (!result || !member(set, message))
+		return VMF_INVALID_ARGUMENT;
+	if (profile < VMF_ENVELOPE_B || profile > VMF_ENVELOPE_D1)
+		return VMF_INVALID_SCHEMA;
+	return schema_identity(set, message, profile, result);
+}
+
+vmf_status vmf_schema_message_id(const vmf_schema_set *set,
+	const vmf_message_schema *message, vmf_message_id *result)
+{
+	return vmf_schema_message_id_for_profile(set, message,
+		set ? set->envelope : VMF_ENVELOPE_UNSPECIFIED, result);
+}
+
+vmf_status vmf_schema_select_for_profile(const vmf_schema_set *set,
+	const vmf_message_id *id, vmf_envelope_version profile,
+	const vmf_message_schema **result)
 {
 	if (result)
 		*result = nullptr;
 	if (!set || !id || !result || (set->message_count && !set->messages))
 		return VMF_INVALID_ARGUMENT;
+	if (profile < VMF_ENVELOPE_B || profile > VMF_ENVELOPE_D1 ||
+		set->envelope < VMF_ENVELOPE_UNSPECIFIED ||
+		set->envelope > VMF_ENVELOPE_D1)
+		return VMF_INVALID_SCHEMA;
 	const vmf_message_schema *match = nullptr;
 	for (size_t i = 0; i < set->message_count; ++i) {
 		vmf_message_id candidate;
-		vmf_status status = vmf_schema_message_id(set,
-			&set->messages[i],
+		vmf_status status = vmf_schema_message_id_for_profile(set,
+			&set->messages[i], profile,
 			&candidate);
 		if (status != VMF_OK)
 			return status;
@@ -1145,6 +1213,13 @@ vmf_status vmf_schema_select(const vmf_schema_set *set,
 	}
 	*result = match;
 	return match ? VMF_OK : VMF_UNKNOWN_MESSAGE;
+}
+
+vmf_status vmf_schema_select(const vmf_schema_set *set,
+	const vmf_message_id *id, const vmf_message_schema **result)
+{
+	return vmf_schema_select_for_profile(set, id,
+		set ? set->envelope : VMF_ENVELOPE_UNSPECIFIED, result);
 }
 
 const vmf_index_schema *vmf_schema_find(const vmf_message_schema *message,
@@ -1206,7 +1281,8 @@ void vmf_internal::destroy_normalized_set(vmf_runtime_set *set,
 }
 
 vmf_status vmf_internal::normalize_schemas(const vmf_schema_set *set,
-	const vmf_limits *limits, const vmf_allocator *allocator,
+	vmf_envelope_version profile, const vmf_limits *limits,
+	const vmf_allocator *allocator,
 	vmf_runtime_set *result, vmf_error *error)
 {
 	if (error)
@@ -1225,13 +1301,14 @@ vmf_status vmf_internal::normalize_schemas(const vmf_schema_set *set,
 		allocator = nullptr;
 	work w = {set, nullptr, limits, allocator, result, error, SIZE_MAX,
 		nullptr, 0, nullptr, VMF_OK};
-	if (set->envelope < VMF_ENVELOPE_B || set->envelope > VMF_ENVELOPE_D1)
+	if (set->envelope < VMF_ENVELOPE_UNSPECIFIED ||
+		set->envelope > VMF_ENVELOPE_D1 ||
+		profile < VMF_ENVELOPE_UNSPECIFIED || profile > VMF_ENVELOPE_D1)
 		return fail(&w, VMF_INVALID_SCHEMA, VMF_PROPERTY_PROFILE);
 	if ((!limits->max_schema_nodes && set->message_count) ||
 		set->message_count > limits->max_schemas)
 		return fail(&w, VMF_LIMIT_EXCEEDED, VMF_PROPERTY_NONE);
-	if (set->standard.kind < VMF_STANDARD_INHERIT ||
-		set->standard.kind > VMF_STANDARD_RAW_CODE)
+	if (!standard_valid(set->standard))
 		return fail(&w, VMF_INVALID_SCHEMA, VMF_PROPERTY_IDENTITY);
 	if (set->standard.kind != VMF_STANDARD_INHERIT ||
 		!set->message_count) {
@@ -1241,7 +1318,7 @@ vmf_status vmf_internal::normalize_schemas(const vmf_schema_set *set,
 		context.messages = &root;
 		context.message_count = 1;
 		vmf_message_id identity;
-		if (vmf_schema_message_id(&context, &root, &identity) != VMF_OK)
+		if (schema_identity(&context, &root, profile, &identity) != VMF_OK)
 			return fail(&w, VMF_INVALID_SCHEMA,
 				VMF_PROPERTY_IDENTITY);
 	}
@@ -1262,7 +1339,7 @@ vmf_status vmf_internal::normalize_schemas(const vmf_schema_set *set,
 		schemas[i] = runtime;
 		runtime->source = w.message;
 		runtime->octet_order = resolved_order(w.message->octet_order);
-		vmf_status status = vmf_schema_message_id(set, w.message,
+		vmf_status status = schema_identity(set, w.message, profile,
 			&runtime->id);
 		if (status != VMF_OK) {
 			fail(&w, status, VMF_PROPERTY_IDENTITY);
@@ -1270,7 +1347,10 @@ vmf_status vmf_internal::normalize_schemas(const vmf_schema_set *set,
 		}
 		for (size_t j = 0; j < i; ++j)
 			if (vmf_message_id_equal(&runtime->id,
-				&schemas[j]->id)) {
+				&schemas[j]->id) &&
+				(profile || standard_equal(
+					selected_standard(set, w.message),
+					selected_standard(set, schemas[j]->source)))) {
 				fail(&w, VMF_DUPLICATE_MESSAGE,
 					VMF_PROPERTY_IDENTITY);
 				break;
@@ -1315,7 +1395,8 @@ vmf_status vmf_internal::validate_schemas_allocated(const vmf_schema_set *set,
 		vmf_error *error)
 {
 	vmf_runtime_set normalized = {};
-	vmf_status status = normalize_schemas(set, limits, allocator,
+	vmf_status status = normalize_schemas(set,
+		set ? set->envelope : VMF_ENVELOPE_UNSPECIFIED, limits, allocator,
 		&normalized, error);
 	if (status == VMF_OK)
 		destroy_normalized_set(&normalized,
@@ -1329,6 +1410,31 @@ vmf_status vmf_schema_set_validate(const vmf_schema_set *set,
 {
 	return vmf_internal::validate_schemas_allocated(set, limits, allocator,
 		error);
+}
+
+vmf_status vmf_schema_set_validate_for_profile(const vmf_schema_set *set,
+	vmf_envelope_version profile, const vmf_limits *limits,
+	const vmf_allocator *allocator, vmf_error *error)
+{
+	if (profile < VMF_ENVELOPE_B || profile > VMF_ENVELOPE_D1) {
+		vmf_status status = set && limits ? VMF_INVALID_SCHEMA :
+			VMF_INVALID_ARGUMENT;
+
+		if (error) {
+			*error = clean_error(status);
+			if (status == VMF_INVALID_SCHEMA)
+				error->property = VMF_PROPERTY_PROFILE;
+		}
+		return status;
+	}
+	vmf_runtime_set normalized = {};
+	vmf_status status = vmf_internal::normalize_schemas(set, profile, limits,
+		allocator, &normalized, error);
+
+	if (status == VMF_OK)
+		vmf_internal::destroy_normalized_set(&normalized,
+			allocator && allocator->allocate ? allocator : nullptr);
+	return status;
 }
 
 vmf_status vmf_schema_validate(const vmf_schema_set *set,

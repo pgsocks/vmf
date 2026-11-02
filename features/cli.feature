@@ -18,6 +18,10 @@ Feature: Inspect, record, and replay VMF streams from pipes
     When I exercise CLI profiles
     Then the CLI outcomes match the requested workflow
 
+  Scenario: Reuse one payload definition across envelope profiles
+    When I exercise CLI portable-schemas
+    Then the CLI outcomes match the requested workflow
+
   Scenario: Observe fragmented input before the producer closes its pipe
     When I exercise CLI live-pipe
     Then the CLI outcomes match the requested workflow

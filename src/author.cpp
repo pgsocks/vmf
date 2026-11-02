@@ -562,7 +562,8 @@ vmf_status validate_envelope(const vmf_author_options *options,
 }
 
 vmf_status validate_descriptors(const vmf_schema_set *set,
-	const vmf_header_fields *header, vmf_author_error *error)
+	vmf_envelope_version profile, const vmf_header_fields *header,
+	vmf_author_error *error)
 {
 	for (size_t i = 0; i < header->message_count; ++i) {
 		const auto *message = &header->messages[i];
@@ -570,7 +571,8 @@ vmf_status validate_descriptors(const vmf_schema_set *set,
 		if (!message->has_body)
 			continue;
 		const vmf_message_schema *schema = nullptr;
-		auto status = vmf_schema_select(set, &message->id, &schema);
+		auto status = vmf_schema_select_for_profile(set, &message->id,
+			profile, &schema);
 
 		if (status != VMF_OK) {
 			error->descriptor_index = i;
@@ -723,8 +725,8 @@ vmf_status validate_entries(author_run *run, const vmf_header_fields *header)
 		if (status == VMF_OK) {
 			vmf_message_id id = {};
 
-			status = vmf_schema_message_id(set,
-				address->schema, &id);
+			status = vmf_schema_message_id_for_profile(set,
+				address->schema, run->options->codec.profile, &id);
 			const auto *message =
 				&header->messages[address->descriptor_index];
 
@@ -761,8 +763,8 @@ vmf_status validate_entries(author_run *run, const vmf_header_fields *header)
 		if (status == VMF_OK) {
 			vmf_message_id id = {};
 
-			status = vmf_schema_message_id(set,
-				address->schema, &id);
+			status = vmf_schema_message_id_for_profile(set,
+				address->schema, run->options->codec.profile, &id);
 			const auto *message =
 				&header->messages[address->descriptor_index];
 
@@ -998,7 +1000,7 @@ vmf_status vmf_author_validate_header(const vmf_author_options *options,
 		status = vmf_encoder_create(&codec, true, &encoder,
 			&error->codec);
 		if (status == VMF_OK)
-			status = validate_descriptors(codec.schemas,
+			status = validate_descriptors(codec.schemas, codec.profile,
 				fields, error);
 		if (status == VMF_OK)
 			status = vmf_encoder_begin_pdu(encoder, &adjusted);
@@ -1064,7 +1066,7 @@ vmf_status vmf_author_encode(const vmf_author_options *options,
 			options->codec.profile);
 
 		status = validate_descriptors(options->codec.schemas,
-			native, error);
+			options->codec.profile, native, error);
 		if (status == VMF_OK)
 			status = validate_entries(&run, native);
 		if (status == VMF_OK)

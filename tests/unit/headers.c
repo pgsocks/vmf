@@ -28,6 +28,9 @@ int vmf_c_consumer(void)
 	vmf_output output = {bytes, sizeof(bytes), 0};
 	int result = 0;
 
+	if (vmf_encoder_begin_schema_pdu(NULL, NULL, NULL, 0) !=
+		VMF_INVALID_ARGUMENT)
+		return 0;
 	if (vmf_schema_set_validate(&schemas, &options.limits, NULL, NULL) !=
 		VMF_OK || vmf_schema_index_info(&schemas, messages, indexes,
 			&info) != VMF_OK || info.kind != VMF_FIELD_UNSIGNED)

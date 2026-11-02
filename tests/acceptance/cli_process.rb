@@ -122,7 +122,7 @@ end
 
 # Independent minimal envelope construction in the documented logical order.
 # The synthetic VMF selector and one-octet body assert no assigned layout.
-def packet(profile, sized: true)
+def packet(profile, sized: true, version: 0)
 	bits = []
 	emit = lambda do |value, width = 1|
 		width.times { |i| bits << ((value >> i) & 1) }
@@ -137,7 +137,7 @@ def packet(profile, sized: true)
 	emit.call(2, 4) # VMF UMF.
 	unless b
 		emit.call(1)
-		emit.call(0, 4) # Explicit raw message-standard zero.
+		emit.call(version, 4) # Explicit message-standard code.
 	end
 	emit.call(1) # Identification present.
 	emit.call(1, 4) # FAD.
@@ -225,6 +225,54 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 			output, = success(run(arguments, wire))
 			check(output == wire, "Profile #{profile} changed bytes.")
 		end
+	when 'portable-schemas'
+		definition = schema(1, 'C')
+		definition.delete('standard_version')
+		definition['message_standard'] = 'MIL-STD-6017B'
+		[nil, 'C'].each do |hint|
+			definition['envelope'] = hint
+			definition.delete('envelope') unless hint
+			File.write(schema_path, JSON.generate(definition))
+			%w[B C D D1].each do |profile|
+				wire = packet(profile, version: profile == 'C' ? 8 : 7)
+				arguments = ['--profile', profile, '--schema', schema_path]
+				output, = success(run(arguments +
+					['--forward', '--record', archive], wire))
+				check(output == wire, 'Shared schema forwarding changed bytes.')
+				metadata = JSON.parse(File.readlines(archive).first)
+				check(metadata['profile'] == profile,
+					'Archive must use the selected envelope profile.')
+				output, = success(run(replay))
+				check(output == wire, 'Shared schema replay changed bytes.')
+			end
+		end
+		other = File.join(directory, 'other profile.json')
+		unrelated = schema(2, 'C')
+		unrelated.delete('standard_version')
+		unrelated['message_standard'] = 'TIDP-TE-R7'
+		File.write(other, JSON.generate(unrelated))
+		output, = success(run(replay + ['--schema', other]))
+		check(output == packet('D1', version: 7),
+			'Unrelated incompatible schemas must not prevent archive replay.')
+		extra = schema(2)
+		extra.delete('standard_version')
+		extra['message_standard'] = 'MIL-STD-6017B'
+		File.write(other, JSON.generate(extra))
+		%w[B C D D1].each do |profile|
+			wire = packet(profile, version: profile == 'C' ? 8 : 7)
+			output, = success(run(['--profile', profile,
+				'--schema', schema_path, '--schema', other,
+				'--forward'], wire))
+			check(output == wire, 'Schema defaults must not constrain merging.')
+		end
+		raw = schema(1, 'C')
+		raw['standard_version'] = 8
+		File.write(schema_path, JSON.generate(raw))
+		error = failure(run(['--profile', 'D1', '--schema', schema_path],
+			packet('D1', version: 7)))
+		check(error.include?('raw standard-version'),
+			'Raw version codes must retain their source envelope meaning.')
+		failure(run(replay))
 	when 'live-pipe'
 		process = CliProcess.new(base + ['-vvvv', '--forward'])
 		begin

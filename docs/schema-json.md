@@ -12,7 +12,7 @@ There are no built-in MIL-STD-6017 message definitions.
 ```json
 {
   "format": "vmf-schema/1",
-  "envelope": "C",
+  "message_standard": "MIL-STD-6017B",
   "messages": [
     {
       "message_number": "K01.1",
@@ -26,9 +26,12 @@ There are no built-in MIL-STD-6017 message definitions.
 ```
 
 This synthetic layout demonstrates syntax, without asserting an assigned
-message definition. `format`, `envelope` and `messages` are required.
-Supported envelopes are `B`, `C`, `D` and `D1`. An empty message array is valid
-when the registry profile and shared standard selection are valid.
+message definition. `format` and `messages` are required. Optional `envelope`
+selects a default `B`, `C`, `D` or `D1` profile for convenience helpers; omission
+leaves the registry independent of an envelope. Set `vmf_options.profile` when
+creating a codec. The same loaded registry can serve compatible profiles without
+copying or redefining its messages. An empty message array is valid when the
+shared standard selection and any default profile are valid.
 Each message requires a VMF K-series `message_number` and ordered `indexes`.
 Optional `subtype` preserves present zero. All payload definitions select
 UMF 2; header-only codec operations remain independent of this restriction.
@@ -37,11 +40,23 @@ The registry and each message can select `message_standard` (a supported named
 edition) or `standard_version` (a raw code or `"absent"`). These properties are
 mutually exclusive at one level. A message-level selection replaces the
 registry selection as a unit. The root cannot inherit a process-global value.
-B rejects an emitted version, C permits absence, and D/D1 require a selection.
-Core rules map editions by envelope; MIL-STD-6017B uses code 8 under C and code
-7 under D/D1. Missing values never select the newest edition or match a
-present zero. Duplicate resolved wire identities fail even when their
-out-of-band descriptions would differ.
+Named editions retain their meaning when an explicit codec profile overrides the
+default. MIL-STD-6017B uses code 8 under C and code 7 under D/D1; B omits the
+version for named editions. C permits an absent selection, while D/D1 require a
+version. Missing values never select the newest edition or match a present zero.
+
+Raw `standard_version` codes remain literal. A supplied `envelope` binds them
+to that profile, so a different codec profile is rejected. Without `envelope`,
+raw codes are interpreted in the explicitly selected profile; named editions
+provide stable meaning across profiles. B rejects a present raw version.
+
+Loading without `envelope` validates semantic identities and payload structure.
+Loading with a default also validates its version mappings. Codec creation and
+`vmf_schema_set_validate_for_profile` check the chosen profile, including
+unsupported editions and duplicate resolved identities. Distinct named editions
+can collide when B omits their versions. Resolve or select exact identities for
+an explicit profile with `vmf_schema_message_id_for_profile` and
+`vmf_schema_select_for_profile`; the ordinary identity helpers require a default.
 
 Array order is authoritative. Index notation `1` and `1.` identifies the same
 numeric address; it does not sort declarations. References use numeric path
@@ -79,8 +94,9 @@ use `default`, `ascii_7`, `ascii_8`, `latin_1` or `utf_8`. The optional message
 property `octet_order` selects physical packing independently of field order.
 
 Named standards are `MIL-STD-6017`, `MIL-STD-6017A` through `MIL-STD-6017E`,
-`TIDP-TE-R2` through `TIDP-TE-R7`, and `TIDP-FTE-R6`. Each is accepted only
-where the selected profile defines its mapping.
+`TIDP-TE-R2` through `TIDP-TE-R7`, and `TIDP-FTE-R6`. A registry without a
+default can contain any supported edition; binding to C/D/D1 requires that
+profile to define its mapping.
 
 Ranges are objects with `first` and `last` integer properties. A condition
 requires `mode` (`all` or `any`) and a nonempty `terms` array, with optional
@@ -198,6 +214,7 @@ vmf_status use_schema_json(const char *json, size_t size)
 		return status;
 	vmf_options options =
 		vmf_options_for_schemas(vmf_schema_json_schemas(document));
+	options.profile = VMF_ENVELOPE_D1;
 	vmf_decoder *decoder = NULL;
 	vmf_error error;
 	status = vmf_decoder_create(&options, &decoder, &error);

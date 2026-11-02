@@ -485,9 +485,196 @@ TEST(NativeSchemaContracts, ProfileVersionsResolveAndPresenceRemainsExact)
 	EXPECT_EQ(VMF_OK, validate_native(&table));
 	table.message.standard.kind = VMF_STANDARD_INHERIT;
 	table.set.standard.kind = VMF_STANDARD_EDITION;
-	EXPECT_EQ(VMF_INVALID_SCHEMA, validate_native(&table));
+	EXPECT_EQ(VMF_OK, validate_native(&table));
 	table.set.envelope = VMF_ENVELOPE_C;
 	table.set.standard.as.edition = VMF_STANDARD_6017D;
+	EXPECT_EQ(VMF_INVALID_SCHEMA, validate_native(&table));
+}
+
+TEST(NativeSchemaContracts, CodecProfileBindsTheSameSemanticRegistry)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.standard.kind = VMF_STANDARD_EDITION;
+	table.set.standard.as.edition = VMF_STANDARD_6017B;
+	auto options = vmf_options_for_schemas(&table.set);
+	options.profile = VMF_ENVELOPE_D1;
+	vmf_decoder *decoder = nullptr;
+	vmf_error error;
+
+	EXPECT_EQ(VMF_OK, vmf_decoder_create(&options, &decoder, &error));
+	vmf_decoder_destroy(decoder);
+	EXPECT_EQ(VMF_ENVELOPE_C, table.set.envelope);
+	EXPECT_EQ(VMF_STANDARD_EDITION, table.set.standard.kind);
+	EXPECT_EQ(VMF_STANDARD_6017B, table.set.standard.as.edition);
+}
+
+TEST(NativeSchemaContracts, UnboundRegistryValidatesSemanticDefinitions)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	table.set.standard.kind = VMF_STANDARD_EDITION;
+	table.set.standard.as.edition = VMF_STANDARD_6017E;
+	EXPECT_EQ(VMF_OK, validate_native(&table));
+	table.set.standard.as.edition = VMF_STANDARD_TIDP_TE_R7;
+	EXPECT_EQ(VMF_OK, validate_native(&table));
+}
+
+TEST(NativeSchemaContracts, ExplicitProfilesMapOneCanonicalSchema)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	table.set.standard.kind = VMF_STANDARD_EDITION;
+	table.set.standard.as.edition = VMF_STANDARD_6017B;
+	auto limits = vmf_default_limits();
+	const vmf_envelope_version profiles[] = {VMF_ENVELOPE_B,
+		VMF_ENVELOPE_C, VMF_ENVELOPE_D, VMF_ENVELOPE_D1};
+	const uint8_t codes[] = {0, 8, 7, 7};
+
+	for (size_t i = 0; i < 4; ++i) {
+		SCOPED_TRACE(i);
+		vmf_message_id id = {};
+		ASSERT_EQ(VMF_OK, vmf_schema_message_id_for_profile(&table.set,
+			&table.message, profiles[i], &id));
+		EXPECT_EQ(i != 0, id.standard_version.present);
+		EXPECT_EQ(codes[i], id.standard_version.value);
+		const vmf_message_schema *selected = nullptr;
+		ASSERT_EQ(VMF_OK, vmf_schema_select_for_profile(&table.set,
+			&id, profiles[i], &selected));
+		EXPECT_EQ(&table.message, selected);
+		EXPECT_EQ(VMF_OK, vmf_schema_set_validate_for_profile(&table.set,
+			profiles[i], &limits, nullptr, nullptr));
+		auto options = vmf_options_for_schemas(&table.set);
+		options.profile = profiles[i];
+		vmf_decoder *decoder = nullptr;
+		vmf_encoder *encoder = nullptr;
+		EXPECT_EQ(VMF_OK,
+			vmf_decoder_create(&options, &decoder, nullptr));
+		EXPECT_EQ(VMF_OK,
+			vmf_encoder_create(&options, false, &encoder, nullptr));
+		vmf_decoder_destroy(decoder);
+		vmf_encoder_destroy(encoder);
+	}
+	EXPECT_EQ(VMF_ENVELOPE_UNSPECIFIED, table.set.envelope);
+	EXPECT_EQ(VMF_STANDARD_EDITION, table.set.standard.kind);
+	EXPECT_EQ(VMF_STANDARD_6017B, table.set.standard.as.edition);
+}
+
+TEST(NativeSchemaContracts, UnboundIdentityRequiresAnExplicitProfile)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	vmf_message_id id = {2, {true, 8}, true, 1, 1, {}};
+	const vmf_message_schema *selected = &table.message;
+
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		vmf_schema_select(&table.set, &id, &selected));
+	EXPECT_EQ(nullptr, selected);
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		vmf_schema_message_id(&table.set, &table.message, &id));
+	EXPECT_EQ(0u, id.user_message_format);
+	EXPECT_FALSE(id.identification_present);
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_UNSPECIFIED, &id));
+	vmf_error error;
+	auto limits = vmf_default_limits();
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_set_validate_for_profile(
+		&table.set, VMF_ENVELOPE_UNSPECIFIED, &limits, nullptr, &error));
+	EXPECT_EQ(VMF_INVALID_SCHEMA, error.status);
+	EXPECT_EQ(VMF_PROPERTY_PROFILE, error.property);
+	EXPECT_EQ(SIZE_MAX, error.schema_index);
+}
+
+TEST(NativeSchemaContracts, RawVersionsRemainLiteralAndProfileBound)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.standard.kind = VMF_STANDARD_RAW_CODE;
+	table.set.standard.as.raw_code = 8;
+	vmf_message_id id = {};
+
+	EXPECT_EQ(VMF_OK, vmf_schema_message_id_for_profile(&table.set,
+		&table.message, VMF_ENVELOPE_C, &id));
+	EXPECT_EQ(8u, id.standard_version.value);
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_D1, &id));
+	EXPECT_EQ(0u, id.user_message_format);
+	auto options = vmf_options_for_schemas(&table.set);
+	options.profile = VMF_ENVELOPE_D1;
+	vmf_decoder *decoder = nullptr;
+	EXPECT_EQ(VMF_INVALID_SCHEMA,
+		vmf_decoder_create(&options, &decoder, nullptr));
+	EXPECT_EQ(nullptr, decoder);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	EXPECT_EQ(VMF_OK, vmf_schema_message_id_for_profile(&table.set,
+		&table.message, VMF_ENVELOPE_D1, &id));
+	EXPECT_EQ(8u, id.standard_version.value);
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_B, &id));
+	table.set.standard.as.raw_code = 10;
+	EXPECT_EQ(VMF_OK, validate_native(&table));
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_C, &id));
+	table.set.standard.as.raw_code = 11;
+	EXPECT_EQ(VMF_INVALID_SCHEMA, validate_native(&table));
+}
+
+TEST(NativeSchemaContracts, NeutralValidationKeepsSemanticEditionsDistinct)
+{
+	vmf_message_schema messages[2] = {};
+	messages[0].message_number = {1, 1};
+	messages[0].standard.kind = VMF_STANDARD_EDITION;
+	messages[0].standard.as.edition = VMF_STANDARD_6017E;
+	messages[1] = messages[0];
+	messages[1].standard.as.edition = VMF_STANDARD_TIDP_TE_R7;
+	vmf_schema_set set = {VMF_ENVELOPE_UNSPECIFIED, messages, 2, {}};
+	auto limits = vmf_default_limits();
+	vmf_error error;
+
+	EXPECT_EQ(VMF_OK,
+		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
+	EXPECT_EQ(VMF_DUPLICATE_MESSAGE, vmf_schema_set_validate_for_profile(
+		&set, VMF_ENVELOPE_B, &limits, nullptr, &error));
+	EXPECT_EQ(1u, error.schema_index);
+	EXPECT_EQ(VMF_PROPERTY_IDENTITY, error.property);
+	messages[1].standard.as.edition = VMF_STANDARD_6017E;
+	EXPECT_EQ(VMF_DUPLICATE_MESSAGE,
+		vmf_schema_set_validate(&set, &limits, nullptr, &error));
+	EXPECT_EQ(1u, error.schema_index);
+	messages[0].standard.kind = VMF_STANDARD_RAW_CODE;
+	messages[0].standard.as.raw_code = 7;
+	messages[1].standard.as.edition = VMF_STANDARD_6017B;
+	EXPECT_EQ(VMF_OK,
+		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
+	EXPECT_EQ(VMF_DUPLICATE_MESSAGE, vmf_schema_set_validate_for_profile(
+		&set, VMF_ENVELOPE_D1, &limits, nullptr, nullptr));
+}
+
+TEST(NativeSchemaContracts, BindingNeverInfersMissingVersions)
+{
+	native_table table;
+	initialize_native(&table, 1);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	vmf_message_id id = {};
+
+	EXPECT_EQ(VMF_OK, validate_native(&table));
+	EXPECT_EQ(VMF_OK, vmf_schema_message_id_for_profile(&table.set,
+		&table.message, VMF_ENVELOPE_B, &id));
+	EXPECT_FALSE(id.standard_version.present);
+	EXPECT_EQ(VMF_OK, vmf_schema_message_id_for_profile(&table.set,
+		&table.message, VMF_ENVELOPE_C, &id));
+	EXPECT_FALSE(id.standard_version.present);
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_D, &id));
+	EXPECT_EQ(VMF_INVALID_SCHEMA, vmf_schema_message_id_for_profile(
+		&table.set, &table.message, VMF_ENVELOPE_D1, &id));
+	table.message.standard.kind = VMF_STANDARD_EDITION;
+	table.message.standard.as.edition = VMF_STANDARD_6017B;
+	table.set.standard.kind = VMF_STANDARD_EDITION;
+	table.set.standard.as.edition = (vmf_message_standard)99;
 	EXPECT_EQ(VMF_INVALID_SCHEMA, validate_native(&table));
 }
 
@@ -569,8 +756,8 @@ TEST(NativeSchemaContracts, IndicatorsMapOnceAndNormalizeStableScopes)
 	table.indexes[1].indicator = VMF_INDICATOR_GRI;
 	auto limits = vmf_default_limits();
 	vmf_runtime_set normalized = {};
-	ASSERT_EQ(VMF_OK, vmf_internal::normalize_schemas(&table.set, &limits,
-		nullptr, &normalized, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_internal::normalize_schemas(&table.set,
+		table.set.envelope, &limits, nullptr, &normalized, nullptr));
 	ASSERT_EQ(1u, normalized.count);
 	const vmf_node *root = normalized.schemas[0]->root;
 	ASSERT_EQ(1u, root->as.group.child_count);
@@ -700,6 +887,40 @@ TEST(NativeSchemaContracts, ValidationAllocationFailuresReleaseAllStorage)
 	}
 }
 
+TEST(NativeSchemaContracts, ProfileValidationFailuresReleaseAllStorage)
+{
+	native_table table;
+	initialize_native(&table, 2);
+	table.set.envelope = VMF_ENVELOPE_UNSPECIFIED;
+	table.set.standard.kind = VMF_STANDARD_EDITION;
+	table.set.standard.as.edition = VMF_STANDARD_6017B;
+	auto limits = vmf_default_limits();
+	native_allocations state = {0, 0, SIZE_MAX};
+	vmf_allocator allocator = {native_allocate, native_free, &state};
+	const vmf_envelope_version profiles[] = {VMF_ENVELOPE_B,
+		VMF_ENVELOPE_C, VMF_ENVELOPE_D, VMF_ENVELOPE_D1};
+
+	for (auto profile : profiles) {
+		SCOPED_TRACE(profile);
+		state = {0, 0, SIZE_MAX};
+		ASSERT_EQ(VMF_OK, vmf_schema_set_validate_for_profile(&table.set,
+			profile, &limits, &allocator, nullptr));
+		EXPECT_EQ(0u, state.live);
+		size_t attempts = state.attempts;
+
+		for (size_t failure = 0; failure < attempts; ++failure) {
+			state = {0, 0, failure};
+			vmf_error error;
+
+			EXPECT_EQ(VMF_OUT_OF_MEMORY,
+				vmf_schema_set_validate_for_profile(&table.set,
+					profile, &limits, &allocator, &error));
+			EXPECT_EQ(VMF_OUT_OF_MEMORY, error.status);
+			EXPECT_EQ(0u, state.live);
+		}
+	}
+}
+
 TEST(NativeSchemaContracts, EmptyRegistriesStillValidateExplicitDefaults)
 {
 	auto limits = vmf_default_limits();
@@ -713,7 +934,7 @@ TEST(NativeSchemaContracts, EmptyRegistriesStillValidateExplicitDefaults)
 	set.envelope = VMF_ENVELOPE_B;
 	set.standard.kind = VMF_STANDARD_EDITION;
 	set.standard.as.edition = VMF_STANDARD_6017B;
-	EXPECT_EQ(VMF_INVALID_SCHEMA,
+	EXPECT_EQ(VMF_OK,
 		vmf_schema_set_validate(&set, &limits, nullptr, nullptr));
 }
 

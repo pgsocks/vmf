@@ -29,11 +29,15 @@ initializes its delivered count, and invalid measurements clear their result.
 ## Ownership and configuration
 
 Create a decoder/encoder with explicit limits and an optional schema registry
-and allocator. A registry selects B/C/D/D1 once; `vmf_options_for_schemas`
-selects that profile and default limits. Manually supplied options must match
-the registry profile. Without a registry, select the profile in ordinary codec
-options for independent envelope parsing/encoding. Creation resolves defaults,
-validates scopes and duplicate wire identities, checks allocation arithmetic,
+and allocator. `vmf_options.profile` selects B/C/D/D1 for that codec. A registry's
+`envelope` is an optional default: zero (`VMF_ENVELOPE_UNSPECIFIED`) leaves the
+choice to the caller. `vmf_options_for_schemas` borrows the registry and copies
+its default profile and default limits. Set `options.profile` before creation
+when that default is unspecified or another envelope is desired. Distinct
+codecs can use the same unchanged registry with different compatible profiles.
+Without a registry, ordinary codec options support independent envelope
+parsing/encoding. Creation resolves defaults, validates scopes and duplicate
+wire identities, checks allocation arithmetic,
 and allocates all bounded traversal, header and chunk storage. Reset and
 streaming allocate nothing. Copy `vmf_default_limits` before overriding limits.
 No caller workspace sizing or externally framed/headerless body APIs exist.
@@ -86,8 +90,17 @@ full envelope formats. Registry and message standard selections distinguish
 inheritance, explicit absence, named editions and raw codes. A message replaces
 the entire registry selection; absence is not a wildcard. B cannot emit a
 standard version, C permits absence, and D/D1 require a selection. Envelope
-profiles never imply a payload edition. MIL-STD-6017B resolves to code 8 under C
-and code 7 under D/D1. Subtype presence is independent of its numeric value.
+profiles never imply a payload edition. A named edition resolves to no emitted
+version under B and to its defined code under C/D/D1. MIL-STD-6017B resolves to
+code 8 under C and code 7 under D/D1. Unsupported edition mappings fail.
+Subtype presence is independent of its numeric value.
+
+Explicit raw standard codes remain literal. With a registry default they are
+bound to that profile; selecting another profile fails rather than changing
+their meaning. Without a default, raw codes are interpreted in the chosen
+profile and do not identify a portable payload edition. Explicit absence stays
+absent and cannot bind a VMF schema to D/D1. Binding also rejects duplicate wire
+identities, including different editions that lose their distinction under B.
 
 Identity comparison includes UMF, standard-version presence/value,
 identification presence, FAD, number and subtype presence/value. Absent values
@@ -110,24 +123,39 @@ static const vmf_message_schema messages[] = {
 	{.message_number = {1, 1}, .indexes = indexes, .index_count = 2}
 };
 static const vmf_schema_set schemas = {
-	.envelope = VMF_ENVELOPE_C, .messages = messages, .message_count = 1
+	.messages = messages, .message_count = 1,
+	.standard = {.kind = VMF_STANDARD_EDITION,
+		.as.edition = VMF_STANDARD_6017B}
 };
 
 /* Synthetic layout; no assigned message definition is implied. */
-vmf_status create_example(vmf_decoder **decoder, vmf_error *error)
+vmf_status create_example(vmf_envelope_version profile,
+	vmf_decoder **decoder, vmf_error *error)
 {
 	vmf_options options = vmf_options_for_schemas(&schemas);
+	options.profile = profile;
 	return vmf_decoder_create(&options, decoder, error);
 }
 ```
 
 `vmf_schema_set_validate` validates the registry with explicit limits and an
 optional allocator; `vmf_schema_validate` additionally selects a message in
-that registry. Both release temporary storage before returning. Errors carry
+that registry. With an envelope default they validate for that profile; without
+one they validate semantic identities and body definitions without choosing an
+envelope. Neutral validation accepts supported named editions even when no
+single envelope can represent them all. `vmf_schema_set_validate_for_profile`
+checks a registry against an explicit profile, including version mappings and
+wire-identity collisions. Codec creation performs the same bound validation.
+Validation releases temporary storage before returning. Errors carry
 schema/index array positions, a property category and related locations;
 these are source locations, never generated traversal IDs.
 
-`vmf_schema_message_id` resolves exact envelope identity.
+`vmf_schema_message_id_for_profile(set, message, profile, &id)` resolves the
+exact identity for a selected envelope. `vmf_schema_select_for_profile` performs
+exact lookup in a set validated for that profile. The ordinary
+`vmf_schema_message_id` and `vmf_schema_select` helpers use the registry default
+and return INVALID_SCHEMA if it is unspecified. No helper chooses a payload
+edition from the envelope or treats absence as a wildcard.
 `vmf_schema_find(message, index_number)` and `vmf_schema_find_key` return
 canonical index definitions. `vmf_schema_index_info` returns the effective
 kind, width, encoding, length, constraints, scale and indicator mapping for a
@@ -290,6 +318,36 @@ without publishing output. After success the application may release the header
 and all its pointees. It starts a managed PDU and clears previous measurements;
 a failed begin preserves completed measurements. `vmf_encoder_bit_count` remains
 cumulative until reset, including across successive managed and manual PDUs.
+
+To derive identities from schemas, use
+`vmf_encoder_begin_schema_pdu(writer, header, schemas, schema_count)`.
+`header` is the native struct for the encoder's configured profile, and the
+schema array has one entry per header descriptor (1..16). Each non-NULL entry
+must be a canonical member of the encoder's registry. The helper derives UMF,
+message identification, subtype, version and body presence. A NULL entry is
+allowed only for a response-only descriptor and preserves its supplied identity;
+a non-NULL schema can also supply a response-only identity. Other metadata and
+size fields are preserved and validated. The helper composes ordinary managed
+begin, copies all header pointees, leaves its inputs unchanged and allocates
+nothing. Failure preserves completed measurements and usable encoder state.
+
+For a D1 encoder configured with the synthetic registry above, this starts a
+PDU without repeating its identity in caller metadata:
+
+```c
+vmf_status begin_example(vmf_encoder *writer)
+{
+	vmf_header_d1 header = {0};
+	vmf_message_header descriptor = {0};
+	const vmf_message_schema *bindings[] = {&messages[0]};
+
+	/* The 5-bit and 13-bit fields occupy three padded octets. */
+	descriptor.message_size_octets = (vmf_optional_u32){true, 3};
+	header.fields.messages = &descriptor;
+	header.fields.message_count = 1;
+	return vmf_encoder_begin_schema_pdu(writer, &header, bindings, 1);
+}
+```
 
 Call `vmf_encoder_next_request` to let VMF traverse the schema, write structural
 controls and padding, and select each body-bearing descriptor. It returns one
@@ -557,8 +615,12 @@ schema manifests.
 `vmf --profile D1 --schema message.json --record capture.jsonl` reads binary
 stdin and writes diagnostics to stderr. `--forward` additionally copies consumed
 wire bytes to stdout. `--headers-only` needs no schemas and skips bodies; it
-cannot record an event log. Multiple schema files must select one profile.
-Each file's shared message standard is resolved before registries are combined.
+cannot record an event log. `--profile` selects the envelope for inspection;
+schema files may omit their envelope default or have different semantic
+defaults. Each file's shared message standard is copied into inherited message
+selections before registries are combined. Named editions retain their meaning
+and map to the selected profile. Raw codes with an explicit source profile
+retain that restriction; conflicting raw-code origins or overrides fail.
 
 `vmf replay capture.jsonl --schema message.json` stages and validates each PDU
 before writing binary stdout. `--timed` preserves recorded intervals. The first
@@ -566,7 +628,9 @@ JSON Lines record has `format: "vmf-events"`, `version: 1`, `profile` and a
 `schemas` array. Each schema entry contains its resolved identity, octet packing,
 ordered functional index definitions and repeat declarations. Replay requires
 an exact matching definition for each recorded identity before producing any
-output. Additional unrelated loaded schemas are allowed; they cannot select
+output. Additional unrelated loaded schemas are allowed, including those that
+cannot bind to the archive's profile. Replay selects the compatible recorded
+subset and validates it before encoding. Unrelated definitions cannot select
 unguarded bodies. Unsupported archive versions are rejected.
 
 Body event references use numeric `index_number` component arrays or a `scope`

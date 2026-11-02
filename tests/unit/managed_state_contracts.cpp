@@ -1,5 +1,6 @@
 #include <gtest/gtest.h>
 #include <vmf/wire.h>
+#include <vmf/wire.hpp>
 #include "fixtures.hpp"
 #include <cstdlib>
 #include <cstring>
@@ -734,6 +735,92 @@ TEST(ManagedState, ProviderRequestStorageSurvivesPendingOutputRetries)
 	EXPECT_EQ(VMF_DONE, status);
 	EXPECT_EQ(1u, state.calls);
 	EXPECT_EQ(f.bytes, bytes);
+}
+
+TEST(ManagedState, SchemaBeginDerivesAndCopiesIdentityWithoutAllocating)
+{
+	allocation_log log;
+	vmf_allocator allocator = {allocate, deallocate, &log};
+	state_fixture f;
+
+	initialize(&f, false, &allocator);
+	ASSERT_NE(nullptr, f.writer);
+	auto header = *static_cast<const vmf_header_d1 *>(f.envelope.header);
+	vmf_message_header message = header.fields.messages[0];
+	const vmf_message_schema *bindings[] = {&f.message};
+
+	header.fields.messages = &message;
+	message.id = {};
+	message.has_body = false;
+	size_t attempts = log.attempts;
+
+	log.deny = true;
+	ASSERT_EQ(VMF_OK, vmf::encoder_begin_schema_pdu(f.writer,
+		&header, bindings, 1));
+	EXPECT_EQ(0u, vmf_encoder_bit_count(f.writer));
+	EXPECT_EQ(0u, message.id.user_message_format);
+	EXPECT_FALSE(message.has_body);
+	header = {};
+	message = {};
+	bindings[0] = nullptr;
+	std::vector<uint8_t> encoded;
+
+	EXPECT_EQ(VMF_DONE, finish(f.writer, false, &encoded));
+	EXPECT_EQ(f.bytes, encoded);
+	EXPECT_EQ(attempts, log.attempts);
+}
+
+TEST(ManagedState, InvalidSchemaBeginPreservesCompletedMeasurements)
+{
+	state_fixture f;
+
+	initialize(&f);
+	ASSERT_NE(nullptr, f.writer);
+	ASSERT_EQ(VMF_OK, vmf_encoder_begin_pdu(f.writer, &f.envelope));
+	ASSERT_EQ(VMF_DONE, finish(f.writer, false));
+	vmf_measurement before = {};
+
+	ASSERT_EQ(VMF_OK, vmf_encoder_measurement(f.writer, 0, &before));
+	auto header = *static_cast<const vmf_header_d1 *>(f.envelope.header);
+	vmf_message_header message = header.fields.messages[0];
+	vmf_message_schema foreign = f.message;
+	const vmf_message_schema *bindings[] = {&foreign};
+
+	header.fields.messages = &message;
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(nullptr, &header, bindings, 1));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, nullptr, bindings, 1));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, nullptr, 1));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, bindings, 0));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, bindings, 17));
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, bindings, 1));
+	bindings[0] = nullptr;
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, bindings, 1));
+	header.fields.message_count = 2;
+	EXPECT_EQ(VMF_INVALID_ARGUMENT,
+		vmf_encoder_begin_schema_pdu(f.writer, &header, bindings, 1));
+	vmf_measurement after = {};
+
+	ASSERT_EQ(VMF_OK, vmf_encoder_measurement(f.writer, 0, &after));
+	EXPECT_EQ(before.header_octets, after.header_octets);
+	EXPECT_EQ(before.body_octets, after.body_octets);
+	EXPECT_EQ(before.pdu_octets, after.pdu_octets);
+	header.fields.message_count = 1;
+	bindings[0] = &f.message;
+	ASSERT_EQ(VMF_OK, vmf_encoder_begin_schema_pdu(f.writer,
+		&header, bindings, 1));
+	EXPECT_EQ(VMF_INVALID_STATE, vmf_encoder_begin_schema_pdu(f.writer,
+		&header, bindings, 1));
+	std::vector<uint8_t> encoded;
+
+	EXPECT_EQ(VMF_DONE, finish(f.writer, false, &encoded));
+	EXPECT_EQ(f.bytes, encoded);
 }
 
 } /* namespace */

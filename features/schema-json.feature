@@ -25,3 +25,18 @@ Feature: Native payload schemas loaded from JSON
     Given a JSON schema set with a valid entry followed by an invalid entry
     When I attempt to load the complete JSON schema set
     Then no schema owner is published and the second entry is diagnosed
+
+  Scenario: One payload definition works with every envelope edition
+    Given an envelope-independent JSON registry for MIL-STD-6017B
+    When I encode and decode the same payload with B, C, D and D1 envelopes
+    Then every envelope carries the same payload using the unchanged registry
+
+  Scenario Outline: Envelope binding rejects unrepresentable identities
+    Given an envelope-independent JSON registry for <definition>
+    When I bind that registry to envelope <envelope>
+    Then binding fails with <status> without changing the registry
+
+    Examples:
+      | definition                       | envelope | status            |
+      | MIL-STD-6017E                    | C        | invalid_schema    |
+      | two editions of the same message | B        | duplicate_message |

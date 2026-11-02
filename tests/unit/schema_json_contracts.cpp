@@ -93,6 +93,56 @@ TEST(SchemaJson, EmptySetLoadsAndClearsDiagnostics)
 	EXPECT_EQ(VMF_PROPERTY_NONE, error.property);
 }
 
+TEST(SchemaJson, OnePortableDefinitionBindsToEveryEnvelope)
+{
+	const std::string input = "{\"format\":\"vmf-schema/1\","
+		"\"message_standard\":\"MIL-STD-6017B\",\"messages\":[" +
+		message(field(1, 8)) + "]}";
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(input, &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+
+	ASSERT_NE(nullptr, set);
+	EXPECT_EQ(0, set->envelope);
+	EXPECT_EQ(VMF_STANDARD_EDITION, set->standard.kind);
+	EXPECT_EQ(VMF_STANDARD_6017B, set->standard.as.edition);
+	for (auto profile : {VMF_ENVELOPE_B, VMF_ENVELOPE_C,
+		     VMF_ENVELOPE_D, VMF_ENVELOPE_D1}) {
+		SCOPED_TRACE(profile);
+		vmf_options options = {};
+
+		options.profile = profile;
+		options.limits = vmf_default_limits();
+		options.schemas = set;
+		vmf_decoder *decoder = nullptr;
+
+		EXPECT_EQ(VMF_OK,
+			vmf_decoder_create(&options, &decoder, nullptr));
+		vmf_decoder_destroy(decoder);
+	}
+	EXPECT_EQ(0, set->envelope);
+	EXPECT_EQ(VMF_STANDARD_6017B, set->standard.as.edition);
+}
+
+TEST(SchemaJson, PortableValidationRetainsEditionsAcrossProfileFamilies)
+{
+	const std::string input = "{\"format\":\"vmf-schema/1\","
+		"\"messages\":[" + message(field(1, 8),
+		",\"message_standard\":\"MIL-STD-6017D\"") + "," +
+		message(field(1, 8),
+			",\"message_standard\":\"TIDP-TE-R7\"") + "]}";
+	json_owner owner;
+
+	ASSERT_EQ(VMF_OK, load(input, &owner));
+	const auto *set = vmf_schema_json_schemas(owner.document);
+
+	ASSERT_EQ(2u, set->message_count);
+	EXPECT_EQ(VMF_STANDARD_6017D, set->messages[0].standard.as.edition);
+	EXPECT_EQ(VMF_STANDARD_TIDP_TE_R7,
+		set->messages[1].standard.as.edition);
+}
+
 TEST(SchemaJson, ApiMisuseInitializesOutputs)
 {
 	auto options = vmf_schema_json_default_options();

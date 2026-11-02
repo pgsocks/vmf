@@ -291,39 +291,29 @@ static bool load_schemas(const arguments *args, schema_storage *storage)
 		storage->documents[storage->count++] = document;
 		const vmf_schema_set *set = vmf_schema_json_schemas(document);
 
-		if (storage->set.envelope &&
-			storage->set.envelope != set->envelope) {
-			fputs("vmf: schema files select different profiles\n",
-				stderr);
-			return false;
-		}
-		if (!storage->set.envelope)
-			storage->set.standard = set->standard;
-		storage->set.envelope = set->envelope;
-		if (args->profile && args->profile != set->envelope) {
-			fputs("vmf: --profile disagrees with schema profile\n",
-				stderr);
-			return false;
-		}
 		if (set->message_count > options.limits.max_schemas -
 			storage->set.message_count) {
 			fputs("vmf: aggregate schema limit exceeded\n", stderr);
 			return false;
 		}
 		for (size_t j = 0; j < set->message_count; ++j) {
-			vmf_message_id id = {};
-
-			if (vmf_schema_message_id(set, &set->messages[j],
-				&id) != VMF_OK)
-				return false;
 			vmf_message_schema *message =
 				&storage->entries[storage->set.message_count++];
 
 			*message = set->messages[j];
-			message->standard.kind = id.standard_version.present ?
-				VMF_STANDARD_RAW_CODE : VMF_STANDARD_ABSENT;
-			message->standard.as.raw_code =
-				id.standard_version.value;
+			if (message->standard.kind == VMF_STANDARD_INHERIT)
+				message->standard = set->standard;
+			if (message->standard.kind != VMF_STANDARD_RAW_CODE ||
+				!set->envelope)
+				continue;
+			if ((storage->set.envelope && storage->set.envelope !=
+				set->envelope) || (args->profile &&
+				args->profile != set->envelope)) {
+				fputs("vmf: raw standard-version codes require "
+					"their schema profile\n", stderr);
+				return false;
+			}
+			storage->set.envelope = set->envelope;
 		}
 
 	}
@@ -836,7 +826,8 @@ static vmf_status recorded_schemas(yyjson_val *root,
 
 		cli_id_from_json(yyjson_obj_get(yyjson_arr_get(definitions, i),
 			"id"), &id);
-		status = vmf_schema_select(available, &id, &message);
+		status = cli_schema_select_compatible(available, &id, *profile,
+			&message);
 		if (status != VMF_OK) {
 			free(entries);
 			return status;

@@ -30,13 +30,23 @@ callbacks preserve embedded integration without exposing private layout.
 
 [Nanopb's descriptors and callbacks][nano] demonstrate that small native
 metadata can drive serialization while streams avoid whole-message storage.
-VMF descriptors are immutable ordered C arrays. A registry selects an envelope
-profile and shared defaults; each message supplies ordered index definitions
-and explicit functional refinements. Core validation and construction share
-default resolution, exact identity checks, scope reconstruction and control
-ownership. The codec owns private normalized traversal storage. Callers need
-no public tree, generated node IDs, separate builder or compilation step.
-C++ wrappers remain aliases and free functions for the C contract.
+VMF descriptors are immutable ordered C arrays. A registry supplies shared
+defaults and an optional envelope default; each message supplies ordered index
+definitions and explicit functional refinements. The codec's explicit profile
+maps semantic message-standard editions to envelope identities without changing
+the shared definitions. Core validation and construction share default
+resolution, exact identity checks, scope reconstruction and control ownership.
+The codec owns private normalized traversal storage. Callers need no public
+tree, generated node IDs, separate builder or compilation step. C++ wrappers
+remain aliases and free functions for the C contract.
+
+A registry without an envelope default validates semantic identities and body
+definitions without selecting a surrogate profile. Codec creation validates
+the entire registry for the selected envelope, including edition mappings and
+identity collisions. Neutral validation can therefore accept definitions that
+cannot coexist under a particular envelope. Both paths use bounded storage.
+Standalone validation releases its temporary storage before returning; codecs
+retain canonical references to the original definitions.
 
 Schema-driven encoding supplies another public way to use that traversal.
 Applications answer raw-field, bit-presence and indicator-repeat-count requests;
@@ -100,7 +110,11 @@ completion permits selecting either mode for the next PDU.
 Managed begin separates header preparation from output flushing. It validates
 and copies before committing a new PDU, leaving completed measurements usable
 on failure. A successful begin clears those measurements and per-PDU state,
-while cumulative bits continue until reset. Automatic progress and pending
+while cumulative bits continue until reset. `vmf_encoder_begin_schema_pdu`
+derives descriptor identities from canonical schemas and the encoder's profile,
+then composes the same managed begin. It derives body presence from response
+metadata, preserves other header fields and copies header pointees without
+allocating or producing output. Automatic progress and pending
 reply progress remain separate: next_request can replay an unanswered request,
 but a reply blocked by output must resume through the same entry point. Retry
 checks inspect active value members rather than struct padding and retain
@@ -128,7 +142,16 @@ Other SPI metadata remains inspectable without assuming plaintext.
 Exact schema selection avoids wildcard-version ambiguity and trial parsing.
 Envelope profiles never imply a payload-standard edition. Shared selections
 are replaced as a unit by message overrides, preserving absence and present
-zero. A codec rejects a profile that disagrees with its registry.
+zero. An explicit codec profile can override the registry's envelope default
+for semantic editions. B omits the message-standard version; C/D/D1 map the
+edition to their own wire codes. Unsupported mappings and duplicate resulting
+identities fail, including different editions that become indistinguishable
+under B. D/D1 still reject an absent VMF version.
+
+Raw codes remain literal. When a registry supplies an envelope default, its raw
+selections are restricted to that profile; without a default, they are checked
+in the explicitly selected profile. This prevents a C wire code from silently
+acquiring a different payload-standard meaning when used under D/D1.
 
 Groups and repeats follow declaration order and typed membership paths.
 Explicit indicators own presence or leading recurrence bits; ordinary one-bit
@@ -142,7 +165,9 @@ The public model excludes generic trees, choices, prefix/remainder extents,
 alternative repeat grammars and display labels. Private traversal primitives
 may retain these features where useful. Event logs use canonical references
 and resolved functional manifests to reject replay against incompatible
-definitions.
+definitions. CLI replay selects the recorded compatible subset of a supplied
+registry; unrelated definitions unavailable in the log's profile do not block
+that subset, while ambiguous matches still fail.
 Dependency validation must prove scope and progress, including empty fields
 and absent regions, not merely impose byte limits. Header retention costs bounded
 arena storage; chunk retention deliberately remains short. Measurement and

@@ -867,12 +867,12 @@ static bool convert(conversion *c, yyjson_val *value)
 		"message_standard", "standard_version"};
 	static const char *const profiles[] = {"B", "C", "D", "D1"};
 	yyjson_val *m[5];
-	int profile;
+	int profile = -1;
 	size_t count;
 
-	if (!object(c, value, keys, 5, 7, m) ||
+	if (!object(c, value, keys, 5, 5, m) ||
 		!string_equal(m[0], "vmf-schema/1") ||
-		!enumeration(c, m[1], profiles, 4, &profile) ||
+		(m[1] && !enumeration(c, m[1], profiles, 4, &profile)) ||
 		!array(c, m[2], &count) ||
 		!standard(c, m[3], m[4], &c->document->schemas.standard))
 		return invalid(c, "invalid schema document");

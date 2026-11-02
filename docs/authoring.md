@@ -7,6 +7,11 @@ when the application must own incremental publication or inspection/replay.
 
 Load or define and validate the schema registry, resolve canonical message and
 index references once, and construct a native revision-specific envelope.
+Choose its profile in `options.codec.profile`; named payload editions can use a
+different profile from the registry's optional default. The native envelope must
+use that revision. Resolve each header's exact body identity with
+`vmf_schema_message_id_for_profile` for that profile. The authoring helper
+validates those identities against the selected profile.
 Supply `vmf_author_field` entries for raw field values and
 `vmf_author_control` entries for GPI optional-group presence or FRI/GRI repeat
 counts. Addresses include a descriptor position, the canonical message/index
@@ -15,6 +20,7 @@ positions are zero-based; a repeat's own count address excludes that repeat.
 
 ```c
 vmf_author_options options = vmf_author_options_for_schemas(schemas);
+options.codec.profile = VMF_ENVELOPE_D1;
 vmf_author_result *result = NULL;
 vmf_author_error error;
 vmf_status status = vmf_author_encode(&options, &envelope,
@@ -33,6 +39,11 @@ an input event. They require an already validated registry. Scope inspection
 returns the canonical control definition, repeat ancestry and absolute bounds.
 `vmf_author_validate_header` checks authored envelope syntax and exact body
 identities without requiring field values.
+
+For managed streaming with identities generated from canonical schema
+references, use `vmf_encoder_begin_schema_pdu`. It derives body identities for
+the encoder's profile while retaining caller-supplied header metadata. Complete
+authoring continues to take exact identities in its native envelope.
 
 Optional field presence follows whether its complete raw entry exists. Optional
 groups use an explicit GPI control when supplied; otherwise descendant field

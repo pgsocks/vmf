@@ -290,6 +290,186 @@ TEST(ManagedEncoding, MultipleBodiesPreserveDescriptorIndexesAndMeasurements)
 	}
 }
 
+TEST(ManagedEncoding, SchemaBindingsSelectDifferentCanonicalBodies)
+{
+	uint32_t addresses[] = {1, 1};
+	vmf_index_schema indexes[2] = {};
+	vmf_message_schema schemas[2] = {};
+	vmf_message_header descriptors[2] = {};
+	vmf_header_d1 header = {};
+	managed_fixture f;
+
+	for (size_t i = 0; i < 2; ++i) {
+		indexes[i].index_number = {addresses + i, 1};
+		indexes[i].number_of_bits = 8 * (i + 1);
+		schemas[i].message_number = {1, static_cast<uint8_t>(i + 1)};
+		schemas[i].indexes = indexes + i;
+		schemas[i].index_count = 1;
+		descriptors[i].message_size_octets = {
+			true, static_cast<uint32_t>(i + 1)};
+	}
+	f.set = {VMF_ENVELOPE_UNSPECIFIED, schemas, 2,
+		{VMF_STANDARD_EDITION, {VMF_STANDARD_6017B}}};
+	header.fields.header_size_octets = {true, 0};
+	header.fields.messages = descriptors;
+	header.fields.message_count = 2;
+	const vmf_message_schema *bindings[] = {schemas, schemas + 1};
+	auto options = fixtures::options(VMF_ENVELOPE_D1, &f.set);
+
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_create(&options, true, &f.writer, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_encoder_begin_schema_pdu(f.writer, &header,
+		bindings, 2));
+	provider_state counter;
+	std::vector<uint8_t> ignored;
+
+	counter.replies = {scalar_reply(0x5a), scalar_reply(0x1234)};
+	ASSERT_EQ(VMF_DONE, dispatch_all(&f, &counter, &ignored, 0, true));
+	vmf_measurement measurement = {};
+
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_measurement(f.writer, 1, &measurement));
+	header.fields.header_size_octets.value =
+		static_cast<uint32_t>(measurement.header_octets);
+	vmf_encoder_destroy(f.writer);
+	f.writer = nullptr;
+	ASSERT_EQ(VMF_OK,
+		vmf_encoder_create(&options, false, &f.writer, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_encoder_begin_schema_pdu(f.writer, &header,
+		bindings, 2));
+	provider_state state;
+	std::vector<uint8_t> encoded;
+
+	state.replies = counter.replies;
+	ASSERT_EQ(VMF_DONE, dispatch_all(&f, &state, &encoded));
+	ASSERT_EQ(2u, state.requests.size());
+	for (size_t i = 0; i < 2; ++i) {
+		EXPECT_EQ(i, state.requests[i].descriptor_index);
+		EXPECT_EQ(schemas + i, state.requests[i].schema);
+		EXPECT_EQ(indexes + i, state.requests[i].index);
+		ASSERT_EQ(VMF_OK,
+			vmf_encoder_measurement(f.writer, i, &measurement));
+		EXPECT_EQ(i + 1, measurement.body_octets);
+		EXPECT_EQ(encoded.size(), measurement.pdu_octets);
+		EXPECT_FALSE(descriptors[i].id.identification_present);
+		EXPECT_FALSE(descriptors[i].has_body);
+	}
+	ASSERT_GE(encoded.size(), 3u);
+	EXPECT_EQ((std::vector<uint8_t>{0x5a, 0x34, 0x12}),
+		std::vector<uint8_t>(encoded.end() - 3, encoded.end()));
+	ASSERT_EQ(VMF_OK,
+		vmf_decoder_create(&options, &f.reader, nullptr));
+	ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(f.reader));
+	vmf_input input = {encoded.data(), encoded.size(), 0, true};
+	std::vector<uint64_t> values;
+	std::vector<const vmf_message_schema *> observed;
+	vmf_status status = VMF_OK;
+
+	for (size_t attempt = 0; attempt < 32; ++attempt) {
+		vmf_event event = {};
+
+		status = vmf_decoder_next(f.reader, &input, &event);
+		if (status != VMF_OK)
+			break;
+		if (event.kind == VMF_EVENT_MESSAGE_BEGIN) {
+			observed.push_back(event.schema);
+			EXPECT_EQ(observed.size(), event.as.message.id.message_number);
+			EXPECT_EQ(7u, event.as.message.id.standard_version.value);
+		} else if (event.kind == VMF_EVENT_FIELD) {
+			values.push_back(event.as.field.value
+				.unsigned_integer.value);
+		}
+	}
+	EXPECT_EQ(VMF_DONE, status);
+	EXPECT_EQ(encoded.size(), input.used);
+	EXPECT_EQ((std::vector<const vmf_message_schema *>{schemas,
+		schemas + 1}), observed);
+	EXPECT_EQ((std::vector<uint64_t>{0x5a, 0x1234}), values);
+}
+
+TEST(ManagedEncoding, SchemaResponseBindingsPreserveOrDeriveIdentity)
+{
+	for (bool bind_schema : {false, true}) {
+		SCOPED_TRACE(bind_schema);
+		managed_fixture f;
+		vmf_message_header message = {};
+		vmf_header_d1 header = {};
+		vmf_address recipient = {true, {true, 2}, {}};
+		vmf_message_id supplied = {1, {}, false, 0, 0, {}};
+
+		f.index.index_number = {&f.address, 1};
+		f.index.number_of_bits = 8;
+		f.message.message_number = {1, 1};
+		f.message.indexes = &f.index;
+		f.message.index_count = 1;
+		f.set = {VMF_ENVELOPE_UNSPECIFIED, &f.message, 1,
+			{VMF_STANDARD_EDITION, {VMF_STANDARD_6017B}}};
+		message.id = supplied;
+		message.has_body = true;
+		message.message_size_octets = {true, 0};
+		message.response.present = true;
+		message.response.acknowledged =
+			{true, 26, 10, 15, 12, 30, 59, {true, 7}};
+		message.response.receipt_compliance = 1;
+		header.fields.originator = {true, {true, 1}, {}};
+		header.fields.recipients = &recipient;
+		header.fields.recipient_count = 1;
+		header.fields.messages = &message;
+		header.fields.message_count = 1;
+		const vmf_message_schema *bindings[] = {
+			bind_schema ? &f.message : nullptr};
+		auto options = fixtures::options(VMF_ENVELOPE_D1,
+			bind_schema ? &f.set : nullptr);
+
+		ASSERT_EQ(VMF_OK,
+			vmf_encoder_create(&options, false, &f.writer, nullptr));
+		ASSERT_EQ(VMF_OK, vmf_encoder_begin_schema_pdu(f.writer,
+			&header, bindings, 1));
+		EXPECT_TRUE(vmf_message_id_equal(&supplied, &message.id));
+		EXPECT_TRUE(message.has_body);
+		provider_state state;
+		std::vector<uint8_t> encoded;
+
+		ASSERT_EQ(VMF_DONE, dispatch_all(&f, &state, &encoded));
+		EXPECT_EQ(0u, state.calls);
+		vmf_measurement measurement = {};
+
+		ASSERT_EQ(VMF_OK,
+			vmf_encoder_measurement(f.writer, 0, &measurement));
+		EXPECT_EQ(0u, measurement.body_octets);
+		EXPECT_EQ(encoded.size(), measurement.header_octets);
+		EXPECT_EQ(encoded.size(), measurement.pdu_octets);
+		ASSERT_EQ(VMF_OK,
+			vmf_decoder_create(&options, &f.reader, nullptr));
+		ASSERT_EQ(VMF_OK, vmf_decoder_begin_pdu(f.reader));
+		vmf_input input = {encoded.data(), encoded.size(), 0, true};
+		vmf_event event = {};
+
+		ASSERT_EQ(VMF_OK, vmf_decoder_next(f.reader, &input, &event));
+		ASSERT_EQ(VMF_EVENT_ENVELOPE, event.kind);
+		const auto *copy = static_cast<const vmf_header_d1 *>(
+			event.as.envelope.header);
+		const auto &decoded = copy->fields.messages[0];
+
+		EXPECT_FALSE(decoded.has_body);
+		EXPECT_TRUE(decoded.response.present);
+		if (bind_schema) {
+			EXPECT_EQ(2u, decoded.id.user_message_format);
+			EXPECT_EQ(1u, decoded.id.message_number);
+			EXPECT_TRUE(decoded.id.standard_version.present);
+			EXPECT_EQ(7u, decoded.id.standard_version.value);
+		} else {
+			EXPECT_TRUE(vmf_message_id_equal(&supplied,
+				&decoded.id));
+		}
+		ASSERT_EQ(VMF_OK, vmf_decoder_next(f.reader, &input, &event));
+		EXPECT_EQ(VMF_EVENT_PDU_END, event.kind);
+		EXPECT_EQ(VMF_DONE,
+			vmf_decoder_next(f.reader, &input, &event));
+		EXPECT_EQ(encoded.size(), input.used);
+	}
+}
+
 TEST(ManagedEncoding, RequestsRemainStableUntilAValidReplyIsConsumed)
 {
 	managed_fixture f;
