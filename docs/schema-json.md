@@ -313,6 +313,11 @@ a scalar-count repeat rejects `count`. Count fields remain ordinary data
 events and are validated, never backpatched. Omitting a count source cannot
 silently select recurrence; that requires the separate `recurrence` wrapper.
 
+A fixed or scalar-count repeat that can execute must have a positive minimum
+wire size per body. A body consisting only of conditional or zero-minimum
+variable fields fails validation. Indicator-controlled recurrence supplies its
+own progress bit.
+
 Dependencies must identify already completed dominating scalars in the
 current or an ancestor scope. Future, self, absent, sibling-repeat and
 previous-occurrence dependencies fail. Count and length sources retain their
