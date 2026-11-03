@@ -281,9 +281,16 @@ static bool load_schemas(const arguments *args, schema_storage *storage)
 		if (!read)
 			return false;
 		if (status != VMF_OK) {
-			fprintf(stderr, "vmf: schema %s: %s, byte=%zu"
-				" schema=%zu index=%zu property=%u\n",
+			fprintf(stderr, "vmf: schema %s: %s: %s, path=%s%s",
 				args->schemas[i], vmf_status_string(status),
+				error.message, error.path,
+				error.path_truncated ? " (truncated)" : "");
+			if (error.related_path[0] || error.related_path_truncated)
+				fprintf(stderr, " related_path=%s%s",
+					error.related_path, error.related_path_truncated
+						? " (truncated)" : "");
+			fprintf(stderr, " byte=%zu schema=%zu index=%zu"
+				" property=%u\n",
 				error.byte_offset, error.schema_index,
 				error.index_position, error.property);
 			return false;

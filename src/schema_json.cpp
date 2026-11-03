@@ -1,6 +1,7 @@
 #include <vmf/schema_json.h>
 #include <yyjson.h>
 #include <cstddef>
+#include <cstdio>
 #include <cstdlib>
 #include <cstring>
 #include <new>
@@ -112,6 +113,30 @@ struct vmf_schema_json_document {
 namespace
 {
 
+struct source {
+	yyjson_val *value;
+	yyjson_val *key;
+	size_t parent;
+	size_t position;
+	size_t depth;
+};
+
+struct reference;
+
+struct message_source {
+	yyjson_val *value;
+	yyjson_val **indexes;
+	yyjson_val **repeats;
+	reference *references;
+};
+
+struct reference {
+	reference *next;
+	vmf_index_number *target;
+	yyjson_val *value;
+	size_t index_position;
+};
+
 struct conversion {
 	vmf_schema_json_document *document;
 	const vmf_limits *limits;
@@ -120,12 +145,111 @@ struct conversion {
 	size_t schema_index;
 	size_t index_position;
 	vmf_schema_property property;
+	yyjson_val *current;
+	yyjson_val *related;
+	source *sources;
+	size_t source_count;
+	message_source *messages;
+	reference *references;
 };
 
 static vmf_schema_json_error diagnostic(vmf_status status)
 {
-	return {status, vmf_status_string(status), SIZE_MAX, SIZE_MAX,
-		SIZE_MAX, VMF_PROPERTY_NONE, SIZE_MAX, 0};
+	vmf_schema_json_error result = {};
+
+	result.status = status;
+	result.message = vmf_status_string(status);
+	result.byte_offset = SIZE_MAX;
+	result.schema_index = SIZE_MAX;
+	result.index_position = SIZE_MAX;
+	result.related_index_position = SIZE_MAX;
+	return result;
+}
+
+static void append_path(char *path, bool *truncated, const char *text,
+	size_t size)
+{
+	if (*truncated)
+		return;
+	size_t used = std::strlen(path);
+
+	if (used + 1 >= 512) {
+		*truncated = true;
+		return;
+	}
+	path[used++] = '/';
+	for (size_t i = 0; i < size;) {
+		const char *piece = text + i;
+		size_t consumed = 1, length = 1;
+		unsigned char code = static_cast<unsigned char>(text[i]);
+
+		if (!code) {
+			*truncated = true;
+			break;
+		}
+		if (code >= 0x80) {
+			consumed = code < 0xe0 ? 2 : (code < 0xf0 ? 3 : 4);
+			length = consumed;
+		} else if (code == '~' || code == '/') {
+			piece = code == '~' ? "~0" : "~1";
+			length = 2;
+		}
+		if (length >= 512 - used || consumed > size - i) {
+			*truncated = true;
+			break;
+		}
+		std::memcpy(path + used, piece, length);
+		used += length;
+		i += consumed;
+	}
+	path[used] = 0;
+}
+
+/* Source parents form an explicit tree. Diagnostics need only the first
+ * 512 edges: every later edge would exceed the fixed pointer buffer.
+ */
+static void source_path(conversion *c, yyjson_val *value, char *path,
+	bool *truncated)
+{
+	if (!value)
+		return;
+	size_t found = SIZE_MAX;
+
+	for (size_t i = 0; i < c->source_count; ++i)
+		if (c->sources[i].value == value || c->sources[i].key == value) {
+			found = i;
+			break;
+		}
+	if (found == SIZE_MAX)
+		return;
+	size_t depth = c->sources[found].depth;
+	bool longer = depth > 512;
+	size_t edges[512];
+
+	while (depth > 512) {
+		found = c->sources[found].parent;
+		--depth;
+	}
+	size_t count = depth;
+
+	while (depth) {
+		edges[--depth] = found;
+		found = c->sources[found].parent;
+	}
+	for (size_t i = 0; i < count && !*truncated; ++i) {
+		const source *entry = &c->sources[edges[i]];
+
+		if (entry->key) {
+			append_path(path, truncated, yyjson_get_str(entry->key),
+				yyjson_get_len(entry->key));
+		} else {
+			char index[32];
+
+			std::snprintf(index, sizeof(index), "%zu", entry->position);
+			append_path(path, truncated, index, std::strlen(index));
+		}
+	}
+	*truncated = *truncated || longer;
 }
 
 static bool fail(conversion *c, vmf_status status, const char *message)
@@ -138,6 +262,10 @@ static bool fail(conversion *c, vmf_status status, const char *message)
 			c->error->schema_index = c->schema_index;
 			c->error->index_position = c->index_position;
 			c->error->property = c->property;
+			source_path(c, c->current, c->error->path,
+				&c->error->path_truncated);
+			source_path(c, c->related, c->error->related_path,
+				&c->error->related_path_truncated);
 		}
 	}
 	return false;
@@ -168,6 +296,43 @@ static void *reserve(conversion *c, size_t count, size_t size)
 	return memory;
 }
 
+/* Breadth-first indexing visits every parser value without recursion and
+ * retains only borrowed parser pointers until native validation finishes.
+ */
+static bool source_tree(conversion *c, yyjson_doc *document)
+{
+	size_t capacity = yyjson_doc_get_val_count(document);
+
+	c->sources = static_cast<source *>(reserve(c, capacity, sizeof(source)));
+	if (!c->sources)
+		return false;
+	c->source_count = 1;
+	c->sources[0] = {yyjson_doc_get_root(document), nullptr, SIZE_MAX, 0, 0};
+	for (size_t i = 0; i < c->source_count; ++i) {
+		yyjson_val *value = c->sources[i].value;
+		size_t depth = c->sources[i].depth + 1;
+
+		if (yyjson_is_obj(value)) {
+			yyjson_obj_iter iter = yyjson_obj_iter_with(value);
+			yyjson_val *key;
+
+			while ((key = yyjson_obj_iter_next(&iter))) {
+				c->sources[c->source_count++] = {
+					yyjson_obj_iter_get_val(key), key, i, 0, depth};
+			}
+		} else if (yyjson_is_arr(value)) {
+			yyjson_arr_iter iter = yyjson_arr_iter_with(value);
+			yyjson_val *child;
+			size_t position = 0;
+
+			while ((child = yyjson_arr_iter_next(&iter)))
+				c->sources[c->source_count++] = {
+					child, nullptr, i, position++, depth};
+		}
+	}
+	return true;
+}
+
 static bool string_equal(yyjson_val *value, const char *text)
 {
 	return yyjson_is_str(value) &&
@@ -182,6 +347,7 @@ static bool object(conversion *c, yyjson_val *value,
 	const char *const *keys, size_t count, uint64_t required,
 	yyjson_val **members)
 {
+	c->current = value;
 	if (!yyjson_is_obj(value))
 		return invalid(c, "expected object");
 	std::memset(members, 0, count * sizeof(*members));
@@ -195,21 +361,34 @@ static bool object(conversion *c, yyjson_val *value,
 		for (i = 0; i < count; ++i)
 			if (string_equal(key, keys[i]))
 				break;
-		if (i == count)
+		if (i == count) {
+			c->current = key;
 			return invalid(c, "unknown or inactive property");
+		}
 		uint64_t bit = UINT64_C(1) << i;
 
-		if (seen & bit)
+		if (seen & bit) {
+			c->current = key;
 			return invalid(c, "duplicate property");
+		}
 		seen |= bit;
 		members[i] = yyjson_obj_iter_get_val(key);
 	}
-	return (seen & required) == required ||
-	       invalid(c, "missing required property");
+	for (size_t i = 0; i < count; ++i) {
+		if (!(required & (UINT64_C(1) << i)) || members[i])
+			continue;
+		invalid(c, "missing required property");
+		if (c->error)
+			append_path(c->error->path, &c->error->path_truncated,
+				keys[i], std::strlen(keys[i]));
+		return false;
+	}
+	return true;
 }
 
 static bool array(conversion *c, yyjson_val *value, size_t *count)
 {
+	c->current = value;
 	if (!yyjson_is_arr(value))
 		return invalid(c, "expected array");
 	*count = yyjson_arr_size(value);
@@ -219,6 +398,7 @@ static bool array(conversion *c, yyjson_val *value, size_t *count)
 static bool unsigned_integer(conversion *c, yyjson_val *value,
 	uint64_t maximum, uint64_t *result)
 {
+	c->current = value;
 	uint64_t number;
 
 	if (yyjson_is_uint(value))
@@ -235,6 +415,7 @@ static bool unsigned_integer(conversion *c, yyjson_val *value,
 
 static bool signed_integer(conversion *c, yyjson_val *value, int64_t *result)
 {
+	c->current = value;
 	if (yyjson_is_sint(value)) {
 		*result = yyjson_get_sint(value);
 		return true;
@@ -248,6 +429,7 @@ static bool signed_integer(conversion *c, yyjson_val *value, int64_t *result)
 
 static bool boolean(conversion *c, yyjson_val *value, bool *result)
 {
+	c->current = value;
 	if (!yyjson_is_bool(value))
 		return invalid(c, "expected boolean");
 	*result = yyjson_get_bool(value);
@@ -257,6 +439,7 @@ static bool boolean(conversion *c, yyjson_val *value, bool *result)
 static bool enumeration(conversion *c, yyjson_val *value,
 	const char *const *names, size_t count, int *result)
 {
+	c->current = value;
 	for (size_t i = 0; i < count; ++i)
 		if (string_equal(value, names[i])) {
 			*result = (int)i;
@@ -268,6 +451,7 @@ static bool enumeration(conversion *c, yyjson_val *value,
 static bool string(conversion *c, yyjson_val *value, bool terminated,
 	const char **result, size_t *length)
 {
+	c->current = value;
 	if (!yyjson_is_str(value))
 		return invalid(c, "expected string");
 	const char *source = yyjson_get_str(value);
@@ -312,134 +496,13 @@ static bool decimal(conversion *c, const char *text, size_t size,
 static bool notation(conversion *c, yyjson_val *value,
 	const char **text, size_t *size)
 {
+	c->current = value;
 	if (!yyjson_is_str(value))
 		return invalid(c, "expected notation string");
 	*text = yyjson_get_str(value);
 	*size = yyjson_get_len(value);
 	return (*size && !std::memchr(*text, 0, *size)) ||
 	       invalid(c, "empty or NUL-containing notation");
-}
-
-static bool index_number(conversion *c, yyjson_val *value,
-	vmf_index_number *result)
-{
-	const char *text;
-	size_t size;
-
-	if (!notation(c, value, &text, &size))
-		return false;
-	size_t count = 1;
-
-	for (size_t i = 0; i + 1 < size; ++i)
-		if (text[i] == '.')
-			++count;
-	uint32_t *parts = static_cast<uint32_t *>(
-		reserve(c, count, sizeof(*parts)));
-
-	if (!parts)
-		return false;
-	size_t position = 0;
-
-	for (size_t i = 0; i < count; ++i) {
-		uint64_t component;
-
-		if (!decimal(c, text, size, &position, UINT32_MAX, &component))
-			return false;
-		parts[i] = (uint32_t)component;
-		if (position < size && text[position++] != '.')
-			return invalid(c, "invalid index separator");
-	}
-	if (position != size)
-		return invalid(c, "invalid index notation");
-	*result = {parts, count};
-	return true;
-}
-
-static bool scope_component(conversion *c, const char *text, size_t size,
-	size_t *position, char prefix, uint32_t *result)
-{
-	uint64_t id;
-
-	if (*position == size || text[(*position)++] != prefix ||
-		!decimal(c, text, size, position, UINT32_MAX, &id))
-		return invalid(c, "invalid scope identifier");
-	*result = (uint32_t)id;
-	return true;
-}
-
-static bool group_path(conversion *c, yyjson_val *value,
-	vmf_group_path *result)
-{
-	const char *text;
-	size_t size;
-
-	if (!notation(c, value, &text, &size))
-		return false;
-	size_t count = 1;
-
-	for (size_t i = 0; i < size; ++i)
-		if (text[i] == '/')
-			++count;
-	vmf_group_id *parts = static_cast<vmf_group_id *>(
-		reserve(c, count, sizeof(*parts)));
-
-	if (!parts)
-		return false;
-	size_t position = 0;
-
-	for (size_t i = 0; i < count; ++i) {
-		if (!scope_component(c, text, size, &position, 'G', &parts[i]))
-			return false;
-		if (i + 1 < count &&
-			(position == size || text[position++] != '/'))
-			return invalid(c, "invalid group path");
-	}
-	if (position != size)
-		return invalid(c, "invalid group path");
-	*result = {parts, count};
-	return true;
-}
-
-static bool repeat_path(conversion *c, yyjson_val *value,
-	vmf_repeat_path *result)
-{
-	const char *text;
-	size_t size;
-
-	if (!notation(c, value, &text, &size))
-		return false;
-	size_t count = 1;
-
-	for (size_t i = 0; i < size; ++i)
-		if (text[i] == '/')
-			++count;
-	vmf_repeat_component *parts = static_cast<vmf_repeat_component *>(
-		reserve(c, count, sizeof(*parts)));
-
-	if (!parts)
-		return false;
-	size_t position = 0;
-
-	for (size_t i = 0; i < count; ++i) {
-		if (!scope_component(c, text, size, &position, 'R',
-			&parts[i].id))
-			return false;
-		if (position < size && text[position] == '(') {
-			++position;
-			parts[i].maximum.present = true;
-			if (!decimal(c, text, size, &position, UINT64_MAX,
-				&parts[i].maximum.value) || position == size ||
-				text[position++] != ')')
-				return invalid(c, "invalid repeat bound");
-		}
-		if (i + 1 < count &&
-			(position == size || text[position++] != '/'))
-			return invalid(c, "invalid repeat path");
-	}
-	if (position != size)
-		return invalid(c, "invalid repeat path");
-	*result = {parts, count};
-	return true;
 }
 
 static bool ranges(conversion *c, yyjson_val *value,
@@ -512,26 +575,49 @@ static bool scale(conversion *c, yyjson_val *value,
 	return true;
 }
 
+static bool field_reference(conversion *c, yyjson_val *value,
+	vmf_index_number *target)
+{
+	const char *text;
+	size_t size;
+
+	c->property = VMF_PROPERTY_DEPENDENCY;
+	if (!notation(c, value, &text, &size))
+		return false;
+	reference *entry = static_cast<reference *>(
+		reserve(c, 1, sizeof(reference)));
+
+	if (!entry)
+		return false;
+	*entry = {c->references, target, value, c->index_position};
+	c->references = entry;
+	return true;
+}
+
 static bool condition(conversion *c, yyjson_val *value, vmf_condition *result)
 {
-	static const char *const keys[] = {"mode", "terms", "negate"};
-	static const char *const names[] = {"all", "any"};
+	static const char *const keys[] = {"all", "any", "negate"};
 	yyjson_val *m[3];
-	int mode;
 
-	if (!object(c, value, keys, 3, 3, m) ||
-		!enumeration(c, m[0], names, 2, &mode) ||
-		!array(c, m[1], &result->term_count) ||
+	if (!object(c, value, keys, 3, 0, m))
+		return false;
+	if (!!m[0] == !!m[1])
+		return invalid(c, "condition requires either all or any");
+	result->mode = m[0] ? VMF_CONDITION_ALL : VMF_CONDITION_ANY;
+	if (!array(c, m[0] ? m[0] : m[1], &result->term_count) ||
 		(m[2] && !boolean(c, m[2], &result->negate)))
 		return false;
-	result->mode = (vmf_condition_mode)mode;
+	if (!result->term_count)
+		return invalid(c, "empty condition");
+	if (result->term_count > c->limits->max_schema_nodes)
+		return fail(c, VMF_LIMIT_EXCEEDED, "condition term limit exceeded");
 	vmf_condition_term *terms = static_cast<vmf_condition_term *>(
 		reserve(c, result->term_count, sizeof(*terms)));
 
-	if (result->term_count && !terms)
+	if (!terms)
 		return false;
 	result->terms = terms;
-	yyjson_arr_iter iter = yyjson_arr_iter_with(m[1]);
+	yyjson_arr_iter iter = yyjson_arr_iter_with(m[0] ? m[0] : m[1]);
 	yyjson_val *item;
 	size_t index = 0;
 	static const char *const term_keys[] = {
@@ -542,7 +628,7 @@ static bool condition(conversion *c, yyjson_val *value, vmf_condition *result)
 		vmf_condition_term *term = &terms[index++];
 
 		if (!object(c, item, term_keys, 4, 5, t) ||
-			!index_number(c, t[0], &term->field) ||
+			!field_reference(c, t[0], &term->field) ||
 			!ranges(c, t[2], &term->values, &term->value_count) ||
 			(t[3] && !boolean(c, t[3], &term->negate)))
 			return false;
@@ -556,34 +642,53 @@ static bool condition(conversion *c, yyjson_val *value, vmf_condition *result)
 	return true;
 }
 
-static bool target(conversion *c, yyjson_val *value,
-	vmf_control_target *result)
-{
-	const char *text;
-	size_t size;
-
-	if (!notation(c, value, &text, &size))
-		return false;
-	if (text[0] != 'G') {
-		result->kind = VMF_TARGET_INDEX;
-		return index_number(c, value, &result->as.index);
-	}
-	size_t position = 0;
-
-	result->kind = VMF_TARGET_GROUP;
-	return scope_component(c, text, size, &position, 'G',
-		&result->as.group) &&
-	       (position == size || invalid(c, "invalid group target"));
-}
-
-static bool refinements(conversion *c, yyjson_val **m,
+static bool field(conversion *c, yyjson_val *value,
 	vmf_index_schema *result)
 {
-	bool present = false;
+	static const char *const keys[] = {"key", "number_of_bits", "type",
+		"bit_order", "text_encoding", "length_from", "length_bias",
+		"when", "allowed", "constant", "scale"};
+	static const char *const types[] = {"unsigned", "bool", "enum",
+		"twos_complement", "ones_complement", "sign_magnitude", "bits",
+		"octets", "text", "literal"};
+	yyjson_val *m[11];
+	int type = 0;
+	const char *name;
+	size_t name_size;
 
-	for (size_t i = 7; i < 16; ++i)
-		present = present || m[i];
-	if (!present)
+	c->property = VMF_PROPERTY_KEY;
+	if (!object(c, value, keys, 11, 1, m) ||
+		!notation(c, m[0], &name, &name_size) ||
+		!string(c, m[0], true, &result->key.data, &result->key.size))
+		return false;
+	c->property = VMF_PROPERTY_ENCODING;
+	if (m[2] && !enumeration(c, m[2], types, 10, &type))
+		return false;
+	if (m[1]) {
+		if (!unsigned_integer(c, m[1], UINT64_MAX,
+			&result->number_of_bits))
+			return false;
+	} else if (type == 1) {
+		result->number_of_bits = 1;
+	} else {
+		c->current = value;
+		invalid(c, "missing required property");
+		if (c->error)
+			append_path(c->error->path, &c->error->path_truncated,
+				"number_of_bits", 14);
+		return false;
+	}
+	static const vmf_encode_type encodings[] = {VMF_ENCODE_UNSIGNED,
+		VMF_ENCODE_BOOL, VMF_ENCODE_ENUM, VMF_ENCODE_SIGNED,
+		VMF_ENCODE_SIGNED, VMF_ENCODE_SIGNED, VMF_ENCODE_BITS,
+		VMF_ENCODE_OCTETS, VMF_ENCODE_TEXT, VMF_ENCODE_LITERAL};
+
+	result->encode_type = encodings[type];
+	bool refined = type >= 3 && type <= 5;
+
+	for (size_t i = 3; i < 11; ++i)
+		refined = refined || m[i];
+	if (!refined)
 		return true;
 	vmf_index_refinements *r = static_cast<vmf_index_refinements *>(
 		reserve(c, 1, sizeof(*r)));
@@ -591,99 +696,60 @@ static bool refinements(conversion *c, yyjson_val **m,
 	if (!r)
 		return false;
 	result->refinements = r;
+	if (type >= 3 && type <= 5)
+		r->representation = static_cast<vmf_integer_representation>(
+			VMF_INTEGER_TWOS_COMPLEMENT + type - 3);
 	int code;
-	static const char *const representations[] = {"default", "unsigned",
-		"twos_complement", "ones_complement", "sign_magnitude"};
-	static const char *const orders[] = {"default", "msb_first",
-		"lsb_first"};
-	static const char *const encodings[] = {"default", "ascii_7", "ascii_8",
-		"latin_1", "utf_8"};
+	static const char *const orders[] = {"default", "msb_first", "lsb_first"};
+	static const char *const text_encodings[] = {"default", "ascii_7",
+		"ascii_8", "latin_1", "utf_8"};
 
-	if (m[7]) {
-		if (!enumeration(c, m[7], representations, 5, &code))
+	if (m[3]) {
+		if (!enumeration(c, m[3], orders, 3, &code))
 			return false;
-		r->representation = (vmf_integer_representation)code;
+		r->bit_order = static_cast<vmf_bit_order>(code);
 	}
-	if (m[8]) {
-		if (!enumeration(c, m[8], orders, 3, &code))
+	if (m[4]) {
+		if (!enumeration(c, m[4], text_encodings, 5, &code))
 			return false;
-		r->bit_order = (vmf_bit_order)code;
+		r->text_encoding = static_cast<vmf_text_encoding>(code);
 	}
-	if (m[9]) {
-		if (!enumeration(c, m[9], encodings, 5, &code))
-			return false;
-		r->text_encoding = (vmf_text_encoding)code;
-	}
-	if (m[10] && !index_number(c, m[10], &r->length_from))
+	if (m[5] && !field_reference(c, m[5], &r->length_from))
 		return false;
-	if (m[11]) {
+	if (m[6]) {
 		r->length_bias.present = true;
-		if (!signed_integer(c, m[11], &r->length_bias.value))
+		if (!signed_integer(c, m[6], &r->length_bias.value))
 			return false;
 	}
-	if (m[12]) {
+	if (m[7]) {
 		vmf_condition *when = static_cast<vmf_condition *>(
 			reserve(c, 1, sizeof(*when)));
 
-		if (!when || !condition(c, m[12], when))
+		if (!when || !condition(c, m[7], when))
 			return false;
 		r->when = when;
 	}
-	if (m[13] && !ranges(c, m[13], &r->allowed, &r->allowed_count))
+	if (m[8] && !ranges(c, m[8], &r->allowed, &r->allowed_count))
 		return false;
-	if (m[14]) {
+	if (m[9]) {
 		r->constant.present = true;
-		if (!unsigned_integer(c, m[14], UINT64_MAX, &r->constant.value))
+		if (!unsigned_integer(c, m[9], UINT64_MAX, &r->constant.value))
 			return false;
 	}
-	if (m[15]) {
+	if (m[10]) {
+		c->current = m[10];
+		if (type != 0 && (type < 3 || type > 5))
+			return invalid(c, "scale requires an integer representation");
 		vmf_scale_definition *value =
 			static_cast<vmf_scale_definition *>(
 				reserve(c, 1, sizeof(*value)));
 
-		if (!value || !scale(c, m[15], value))
+		if (!value || !scale(c, m[10], value))
 			return false;
 		r->scale = value;
+		result->encode_type = VMF_ENCODE_SCALED;
 	}
 	return true;
-}
-
-static bool index(conversion *c, yyjson_val *value, vmf_index_schema *result)
-{
-	static const char *const keys[] = {"index_number", "number_of_bits",
-		"group_code", "repeat_code", "encode_type", "indicator",
-		"target",
-		"representation", "bit_order", "text_encoding", "length_from",
-		"length_bias", "when", "allowed", "constant", "scale", "key"};
-	static const char *const types[] = {"default", "bool", "unsigned",
-		"signed", "enum", "scaled", "bits", "octets", "text",
-		"literal"};
-	static const char *const indicators[] = {"none", "fpi", "gpi", "fri",
-		"gri"};
-	yyjson_val *m[17];
-	int code;
-
-	if (!object(c, value, keys, 17, 1, m) ||
-		!index_number(c, m[0], &result->index_number) ||
-		(m[1] && !unsigned_integer(c, m[1], UINT64_MAX,
-			&result->number_of_bits)) ||
-		(m[2] && !group_path(c, m[2], &result->group_code)) ||
-		(m[3] && !repeat_path(c, m[3], &result->repeat_code)))
-		return false;
-	if (m[4]) {
-		if (!enumeration(c, m[4], types, 10, &code))
-			return false;
-		result->encode_type = (vmf_encode_type)code;
-	}
-	if (m[5]) {
-		if (!enumeration(c, m[5], indicators, 5, &code))
-			return false;
-		result->indicator = (vmf_indicator_role)code;
-	}
-	return (!m[6] || target(c, m[6], &result->target)) &&
-	       refinements(c, m, result) &&
-	       (!m[16] || string(c, m[16], false,
-			 &result->key.data, &result->key.size));
 }
 
 static bool standard(conversion *c, yyjson_val *edition,
@@ -718,79 +784,390 @@ static bool standard(conversion *c, yyjson_val *edition,
 	return true;
 }
 
-static bool repeats(conversion *c, yyjson_val *value,
-	vmf_message_schema *result)
+struct node_frame {
+	yyjson_val *value;
+	yyjson_val *children;
+	yyjson_arr_iter iterator;
+	size_t next;
+	uint32_t component;
+	uint32_t group;
+	uint32_t repeat;
+	uint64_t maximum;
+	bool entered;
+	bool recurrence;
+};
+
+struct lowering {
+	conversion *context;
+	vmf_message_schema *message;
+	message_source *source;
+	node_frame *frames;
+	size_t stack;
+	size_t capacity;
+	size_t indexes;
+	size_t repeats;
+	size_t nodes;
+	uint32_t groups;
+	uint32_t repeat_ids;
+	bool emit;
+};
+
+static bool direct_field(yyjson_val *value)
 {
-	if (!array(c, value, &result->repeat_count))
-		return false;
-	vmf_repeat_definition *items = static_cast<vmf_repeat_definition *>(
-		reserve(c, result->repeat_count, sizeof(*items)));
+	return yyjson_is_obj(value) && !yyjson_obj_get(value, "optional") &&
+	       !yyjson_obj_get(value, "recurrence") &&
+	       !yyjson_obj_get(value, "repeat");
+}
 
-	if (result->repeat_count && !items)
+static bool add_nodes(lowering *l, size_t count)
+{
+	if (count > l->context->limits->max_schema_nodes - l->nodes)
+		return fail(l->context, VMF_LIMIT_EXCEEDED,
+			"schema node limit exceeded");
+	l->nodes += count;
+	return true;
+}
+
+static bool address(lowering *l, vmf_index_number *result, bool child)
+{
+	conversion *c = l->context;
+	size_t count = l->stack - 1;
+
+	if (child && count == c->limits->max_depth)
+		return fail(c, VMF_LIMIT_EXCEEDED, "schema depth limit exceeded");
+	uint32_t *parts = static_cast<uint32_t *>(
+		reserve(c, count + (child ? 1 : 0), sizeof(*parts)));
+
+	if (!parts)
 		return false;
-	result->repeats = items;
-	yyjson_arr_iter iter = yyjson_arr_iter_with(value);
-	yyjson_val *item;
-	size_t i = 0;
-	static const char *const keys[] = {"repeat_code", "count", "count_from",
+	for (size_t i = 0; i < count; ++i)
+		parts[i] = l->frames[i + 1].component;
+	if (child)
+		parts[count++] = 1;
+	*result = {parts, count};
+	return true;
+}
+
+static bool emit_index(lowering *l, vmf_indicator_role indicator)
+{
+	conversion *c = l->context;
+	size_t position = l->indexes++;
+
+	c->index_position = position;
+	if (l->indexes > c->limits->max_schema_nodes)
+		return fail(c, VMF_LIMIT_EXCEEDED, "schema index limit exceeded");
+	if (!l->emit)
+		return true;
+	node_frame *frame = &l->frames[l->stack - 1];
+	vmf_index_schema *index = const_cast<vmf_index_schema *>(
+		&l->message->indexes[position]);
+
+	c->current = frame->value;
+	l->source->indexes[position] = frame->value;
+	if (!address(l, &index->index_number, false))
+		return false;
+	index->indicator = indicator;
+	if (indicator != VMF_INDICATOR_NONE)
+		index->number_of_bits = 1;
+	size_t groups = 0, repeats = 0;
+
+	for (size_t i = 1; i < l->stack; ++i) {
+		groups += l->frames[i].group &&
+			!(i + 1 == l->stack && indicator == VMF_INDICATOR_GPI);
+		repeats += l->frames[i].repeat != 0;
+	}
+	vmf_group_id *group_parts = static_cast<vmf_group_id *>(
+		reserve(c, groups, sizeof(*group_parts)));
+	vmf_repeat_component *repeat_parts =
+		static_cast<vmf_repeat_component *>(
+			reserve(c, repeats, sizeof(*repeat_parts)));
+
+	if ((groups && !group_parts) || (repeats && !repeat_parts))
+		return false;
+	index->group_code = {group_parts, groups};
+	index->repeat_code = {repeat_parts, repeats};
+	groups = 0;
+	repeats = 0;
+	for (size_t i = 1; i < l->stack; ++i) {
+		const node_frame *part = &l->frames[i];
+
+		if (part->group &&
+			!(i + 1 == l->stack && indicator == VMF_INDICATOR_GPI))
+			group_parts[groups++] = part->group;
+		if (!part->repeat)
+			continue;
+		repeat_parts[repeats].id = part->repeat;
+		if (i + 1 == l->stack && frame->recurrence) {
+			repeat_parts[repeats].maximum = {true, frame->maximum};
+		}
+		++repeats;
+	}
+	if (indicator == VMF_INDICATOR_FPI) {
+		index->target.kind = VMF_TARGET_INDEX;
+		return address(l, &index->target.as.index, true);
+	}
+	if (indicator == VMF_INDICATOR_GPI) {
+		index->target.kind = VMF_TARGET_GROUP;
+		index->target.as.group = frame->group;
+	}
+	if (indicator != VMF_INDICATOR_NONE)
+		return true;
+	if (!field(c, frame->value, index))
+		return false;
+	for (size_t i = 0; i < position; ++i) {
+		const vmf_index_schema *previous = &l->message->indexes[i];
+
+		if (previous->key.size != index->key.size ||
+			!previous->key.size || std::memcmp(previous->key.data,
+				index->key.data, index->key.size))
+			continue;
+		c->current = yyjson_obj_get(frame->value, "key");
+		c->related = yyjson_obj_get(l->source->indexes[i], "key");
+		c->property = VMF_PROPERTY_KEY;
+		invalid(c, "duplicate field key");
+		if (c->error)
+			c->error->related_index_position = i;
+		return false;
+	}
+	return true;
+}
+
+static bool repeat_definition(lowering *l, yyjson_val *value,
+	node_frame *frame)
+{
+	conversion *c = l->context;
+	static const char *const keys[] = {"body", "count", "count_from",
 		"maximum", "minimum", "bias"};
+	yyjson_val *m[6];
+	vmf_repeat_definition definition = {};
 
-	while ((item = yyjson_arr_iter_next(&iter))) {
-		yyjson_val *m[6];
-		vmf_repeat_definition *r = &items[i++];
-		const char *text;
-		size_t size, position = 0;
-
-		if (!object(c, item, keys, 6, 1, m) ||
-			!notation(c, m[0], &text, &size) ||
-			!scope_component(c, text, size, &position, 'R', &r->id))
+	if (!object(c, value, keys, 6, 1, m))
+		return false;
+	if (!!m[1] == !!m[2])
+		return invalid(c, "repeat requires one count mechanism");
+	definition.id = frame->repeat;
+	frame->children = m[0];
+	if (m[1]) {
+		if (m[3] || m[4] || m[5]) {
+			c->current = m[3] ? m[3] : (m[4] ? m[4] : m[5]);
+			return invalid(c, "inactive fixed repeat property");
+		}
+		if (!unsigned_integer(c, m[1], UINT64_MAX - 1,
+			&definition.count))
 			return false;
-		if (position != size)
-			return invalid(c,
-				"repeat declaration requires one identifier");
-		if (!!m[1] == !!m[2])
-			return invalid(c,
-				"repeat requires one count mechanism");
-		if (m[1]) {
-			if (m[3] || m[4] || m[5])
-				return invalid(c,
-					"inactive fixed repeat property");
-			if (!unsigned_integer(c, m[1], UINT64_MAX, &r->count))
+	} else {
+		definition.kind = VMF_REPEAT_FIELD;
+		if (!m[3]) {
+			c->current = value;
+			invalid(c, "missing required property");
+			if (c->error)
+				append_path(c->error->path,
+					&c->error->path_truncated, "maximum", 7);
+			return false;
+		}
+		const char *key;
+		size_t size;
+
+		if (!notation(c, m[2], &key, &size) ||
+			!unsigned_integer(c, m[3], UINT64_MAX - 1,
+				&definition.maximum))
+			return false;
+		if (m[4]) {
+			definition.minimum.present = true;
+			if (!unsigned_integer(c, m[4], UINT64_MAX,
+				&definition.minimum.value))
 				return false;
-		} else {
-			r->kind = VMF_REPEAT_FIELD;
-			if (!index_number(c, m[2], &r->count_from) ||
-				!unsigned_integer(c, m[3], UINT64_MAX,
-					&r->maximum))
+		}
+		if (m[5]) {
+			definition.bias.present = true;
+			if (!signed_integer(c, m[5], &definition.bias.value))
 				return false;
-			if (m[4]) {
-				r->minimum.present = true;
-				if (!unsigned_integer(c, m[4], UINT64_MAX,
-					&r->minimum.value))
-					return false;
-			}
-			if (m[5]) {
-				r->bias.present = true;
-				if (!signed_integer(c, m[5], &r->bias.value))
-					return false;
-			}
 		}
 	}
+	size_t position = l->repeats++;
+
+	if (!l->emit)
+		return true;
+	vmf_repeat_definition *result = const_cast<vmf_repeat_definition *>(
+		&l->message->repeats[position]);
+
+	*result = definition;
+	l->source->repeats[position] = frame->value;
+	c->index_position = l->indexes;
+	return !m[2] || field_reference(c, m[2], &result->count_from);
+}
+
+static bool enter_node(lowering *l)
+{
+	conversion *c = l->context;
+	node_frame *frame = &l->frames[l->stack - 1];
+	yyjson_val *value = frame->value;
+
+	c->current = value;
+	c->property = VMF_PROPERTY_INDEX;
+	frame->entered = true;
+	if (yyjson_is_arr(value)) {
+		frame->children = value;
+	} else if (yyjson_is_obj(value)) {
+		yyjson_val *optional = yyjson_obj_get(value, "optional");
+		yyjson_val *recurrence = yyjson_obj_get(value, "recurrence");
+		yyjson_val *repeat = yyjson_obj_get(value, "repeat");
+
+		if (!optional && !recurrence && !repeat) {
+			return add_nodes(l, 1) &&
+			       emit_index(l, VMF_INDICATOR_NONE);
+		}
+		const char *name = optional ? "optional" :
+			(recurrence ? "recurrence" : "repeat");
+		const char *keys[] = {name};
+		yyjson_val *m[1];
+
+		if (!object(c, value, keys, 1, 1, m))
+			return false;
+		if (optional) {
+			frame->children = optional;
+			bool leaf = direct_field(optional);
+
+			if (!leaf) {
+				if (!add_nodes(l, 1) || l->groups == UINT32_MAX)
+					return fail(c, VMF_LIMIT_EXCEEDED,
+						"group identifier limit exceeded");
+				frame->group = ++l->groups;
+			}
+			if (!emit_index(l,
+				leaf ? VMF_INDICATOR_FPI : VMF_INDICATOR_GPI))
+				return false;
+		} else {
+			if (!add_nodes(l, 2) || l->repeat_ids == UINT32_MAX)
+				return fail(c, VMF_LIMIT_EXCEEDED,
+					"repeat identifier limit exceeded");
+			frame->repeat = ++l->repeat_ids;
+			if (recurrence) {
+				static const char *const names[] = {"maximum", "body"};
+				yyjson_val *parts[2];
+
+				if (!object(c, recurrence, names, 2, 3, parts) ||
+					!unsigned_integer(c, parts[0], UINT64_MAX - 1,
+						&frame->maximum))
+					return false;
+				if (!frame->maximum)
+					return invalid(c, "recurrence maximum must be positive");
+				frame->children = parts[1];
+				frame->recurrence = true;
+				if (!emit_index(l, direct_field(parts[1]) ?
+					VMF_INDICATOR_FRI : VMF_INDICATOR_GRI))
+					return false;
+			} else if (!repeat_definition(l, repeat, frame)) {
+				return false;
+			}
+		}
+	} else {
+		return invalid(c, "expected field, group or wrapper");
+	}
+	if (yyjson_is_arr(frame->children)) {
+		if (!yyjson_arr_size(frame->children)) {
+			c->current = frame->children;
+			return invalid(c, "empty nested group");
+		}
+		frame->iterator = yyjson_arr_iter_with(frame->children);
+	}
+	return true;
+}
+
+/* Root lists and wrapper body lists supply sibling positions directly.
+ * Plain nested lists add an address level but no native group membership.
+ * Each active frame owns the membership introduced by that wrapper.
+ */
+static bool walk(lowering *l, yyjson_val *elements)
+{
+	conversion *c = l->context;
+
+	l->stack = 1;
+	l->nodes = 1;
+	if (!c->limits->max_schema_nodes)
+		return fail(c, VMF_LIMIT_EXCEEDED, "schema node limit exceeded");
+	l->frames[0] = {};
+	l->frames[0].value = elements;
+	l->frames[0].children = elements;
+	l->frames[0].iterator = yyjson_arr_iter_with(elements);
+	l->frames[0].entered = true;
+	while (l->stack) {
+		node_frame *frame = &l->frames[l->stack - 1];
+
+		if (!frame->entered && !enter_node(l))
+			return false;
+		yyjson_val *child = nullptr;
+
+		if (yyjson_is_arr(frame->children))
+			child = yyjson_arr_iter_next(&frame->iterator);
+		else if (frame->children && !frame->next)
+			child = frame->children;
+		if (!child) {
+			--l->stack;
+			continue;
+		}
+		c->current = child;
+		if (l->stack == l->capacity ||
+			l->stack > c->limits->max_depth || frame->next == UINT32_MAX)
+			return fail(c, VMF_LIMIT_EXCEEDED,
+				"schema depth or position limit exceeded");
+		uint32_t component = static_cast<uint32_t>(++frame->next);
+
+		l->frames[l->stack++] = {};
+		l->frames[l->stack - 1].value = child;
+		l->frames[l->stack - 1].component = component;
+	}
+	c->index_position = SIZE_MAX;
+	return true;
+}
+
+static bool resolve_references(conversion *c,
+	const vmf_message_schema *message)
+{
+	while (c->references) {
+		reference *entry = c->references;
+		const char *key = yyjson_get_str(entry->value);
+		size_t size = yyjson_get_len(entry->value);
+		const vmf_index_schema *found = nullptr;
+
+		for (size_t i = 0; i < message->index_count; ++i) {
+			const vmf_index_schema *candidate = &message->indexes[i];
+
+			if (size == candidate->key.size &&
+				!std::memcmp(key, candidate->key.data, size)) {
+				found = candidate;
+				break;
+			}
+		}
+		if (!found) {
+			c->current = entry->value;
+			c->index_position = entry->index_position;
+			c->property = VMF_PROPERTY_DEPENDENCY;
+			return invalid(c, "unknown field reference");
+		}
+		*entry->target = found->index_number;
+		c->references = entry->next;
+		message_source *source = &c->messages[c->schema_index];
+
+		entry->next = source->references;
+		source->references = entry;
+	}
+	c->index_position = SIZE_MAX;
 	return true;
 }
 
 static bool message(conversion *c, yyjson_val *value,
 	vmf_message_schema *result)
 {
-	static const char *const keys[] = {"message_number", "indexes",
-		"message_standard", "standard_version", "subtype", "repeats",
-		"octet_order"};
-	yyjson_val *m[7];
+	static const char *const keys[] = {"message_number", "elements",
+		"message_standard", "standard_version", "subtype", "octet_order"};
+	yyjson_val *m[6];
 	const char *text;
 	size_t size, position = 1;
 	uint64_t area, number;
 
-	if (!object(c, value, keys, 7, 3, m) ||
+	c->property = VMF_PROPERTY_IDENTITY;
+	if (!object(c, value, keys, 6, 3, m) ||
 		!notation(c, m[0], &text, &size))
 		return false;
 	if (text[0] != 'K' ||
@@ -800,12 +1177,11 @@ static bool message(conversion *c, yyjson_val *value,
 		position != size)
 		return invalid(c, "invalid K-series message number");
 	result->message_number = {(uint8_t)area, (uint8_t)number};
+	size_t count;
+
 	if (!standard(c, m[2], m[3], &result->standard) ||
-		!array(c, m[1], &result->index_count))
+		!array(c, m[1], &count))
 		return false;
-	if (result->index_count > c->limits->max_schema_nodes)
-		return fail(c, VMF_LIMIT_EXCEEDED,
-			"schema index limit exceeded");
 	if (m[4]) {
 		uint64_t subtype;
 
@@ -813,38 +1189,57 @@ static bool message(conversion *c, yyjson_val *value,
 			return false;
 		result->subtype = {true, (uint8_t)subtype};
 	}
-	if (m[5] && !repeats(c, m[5], result))
-		return false;
-	if (m[6]) {
-		static const char *const names[] = {"default", "msb_first",
-			"lsb_first"};
+	if (m[5]) {
+		static const char *const names[] = {"default", "msb_first", "lsb_first"};
 		int code;
 
-		if (!enumeration(c, m[6], names, 3, &code))
+		if (!enumeration(c, m[5], names, 3, &code))
 			return false;
-		result->octet_order = (vmf_bit_order)code;
+		result->octet_order = static_cast<vmf_bit_order>(code);
 	}
-	vmf_index_schema *items = static_cast<vmf_index_schema *>(
-		reserve(c, result->index_count, sizeof(*items)));
+	size_t capacity = c->source_count;
 
-	if (result->index_count && !items)
+	if (c->limits->max_depth < capacity)
+		capacity = c->limits->max_depth + 1;
+	node_frame *frames = static_cast<node_frame *>(
+		reserve(c, capacity, sizeof(*frames)));
+
+	if (!frames)
 		return false;
-	result->indexes = items;
-	yyjson_arr_iter iter = yyjson_arr_iter_with(m[1]);
-	yyjson_val *item;
-	size_t i = 0;
+	message_source *source = &c->messages[c->schema_index];
+	lowering l = {c, result, source, frames, 0, capacity, 0, 0, 0, 0, 0,
+		false};
 
-	while ((item = yyjson_arr_iter_next(&iter))) {
-		c->index_position = i;
-		if (!index(c, item, &items[i++]))
-			return false;
-	}
-	c->index_position = SIZE_MAX;
-	return true;
+	source->value = value;
+	if (!walk(&l, m[1]))
+		return false;
+	result->index_count = l.indexes;
+	result->repeat_count = l.repeats;
+	result->indexes = static_cast<vmf_index_schema *>(
+		reserve(c, l.indexes, sizeof(vmf_index_schema)));
+	result->repeats = static_cast<vmf_repeat_definition *>(
+		reserve(c, l.repeats, sizeof(vmf_repeat_definition)));
+	source->indexes = static_cast<yyjson_val **>(
+		reserve(c, l.indexes, sizeof(yyjson_val *)));
+	source->repeats = static_cast<yyjson_val **>(
+		reserve(c, l.repeats, sizeof(yyjson_val *)));
+	if ((l.indexes && (!result->indexes || !source->indexes)) ||
+		(l.repeats && (!result->repeats || !source->repeats)))
+		return false;
+	l.indexes = 0;
+	l.repeats = 0;
+	l.groups = 0;
+	l.repeat_ids = 0;
+	l.emit = true;
+	bool converted = walk(&l, m[1]) && resolve_references(c, result);
+
+	memory_deallocate(&c->document->memory, frames);
+	return converted;
 }
 
 static bool convert(conversion *c, yyjson_val *value)
 {
+	c->current = value;
 	if (!yyjson_is_obj(value))
 		return invalid(c, "expected object");
 	yyjson_val *format = nullptr;
@@ -853,8 +1248,10 @@ static bool convert(conversion *c, yyjson_val *value)
 
 	while ((key = yyjson_obj_iter_next(&properties)))
 		if (string_equal(key, "format")) {
-			if (format)
+			if (format) {
+				c->current = key;
 				return invalid(c, "duplicate property");
+			}
 			format = yyjson_obj_iter_get_val(key);
 		}
 
@@ -882,7 +1279,9 @@ static bool convert(conversion *c, yyjson_val *value)
 	vmf_message_schema *items = static_cast<vmf_message_schema *>(
 		reserve(c, count, sizeof(*items)));
 
-	if (count && !items)
+	c->messages = static_cast<message_source *>(
+		reserve(c, count, sizeof(message_source)));
+	if (count && (!items || !c->messages))
 		return false;
 	c->document->schemas.envelope = (vmf_envelope_version)(profile + 1);
 	c->document->schemas.messages = items;
@@ -900,6 +1299,119 @@ static bool convert(conversion *c, yyjson_val *value)
 	return true;
 }
 
+static size_t source_position(conversion *c, yyjson_val *value)
+{
+	for (size_t i = 0; i < c->source_count; ++i)
+		if (c->sources[i].value == value)
+			return i;
+	return SIZE_MAX;
+}
+
+static yyjson_val *common_source(conversion *c, yyjson_val *a,
+	yyjson_val *b)
+{
+	size_t first = source_position(c, a);
+	size_t second = source_position(c, b);
+
+	if (first == SIZE_MAX || second == SIZE_MAX)
+		return nullptr;
+	while (c->sources[first].depth > c->sources[second].depth)
+		first = c->sources[first].parent;
+	while (c->sources[second].depth > c->sources[first].depth)
+		second = c->sources[second].parent;
+	while (first != second) {
+		first = c->sources[first].parent;
+		second = c->sources[second].parent;
+	}
+	return c->sources[first].value;
+}
+
+/* Width is a precise source location only when the width itself violates an
+ * intrinsic bound. Otherwise retain the whole field: native diagnostics do
+ * not identify which of several encoding refinements caused the failure.
+ */
+static bool invalid_width(conversion *c, const vmf_index_schema *index)
+{
+	uint64_t width = index->number_of_bits;
+
+	if (width == VMF_UNITS_UNKNOWN || width > c->limits->max_field_bits)
+		return true;
+	if (index->indicator)
+		return width > 1;
+	if (index->encode_type <= VMF_ENCODE_SCALED) {
+		if (!width || width > 64)
+			return true;
+		if (index->encode_type == VMF_ENCODE_BOOL && width != 1)
+			return true;
+		return index->refinements &&
+			index->refinements->representation > VMF_INTEGER_UNSIGNED &&
+			width < 2;
+	}
+	bool literal = index->encode_type == VMF_ENCODE_LITERAL;
+	bool variable = literal || (index->refinements &&
+		index->refinements->length_from.count);
+	unsigned unit = index->encode_type == VMF_ENCODE_BITS ? 1 : 8;
+
+	if (index->encode_type == VMF_ENCODE_TEXT || literal) {
+		vmf_text_encoding encoding = index->refinements ?
+			index->refinements->text_encoding : VMF_TEXT_DEFAULT;
+
+		if (encoding == VMF_TEXT_DEFAULT || encoding == VMF_TEXT_ASCII_7)
+			unit = 7;
+	}
+	return (!variable && !width) || width % unit;
+}
+
+static yyjson_val *native_source(conversion *c,
+	const vmf_error *error, size_t position, bool related)
+{
+	if (error->schema_index >= c->document->schemas.message_count)
+		return c->current;
+	const vmf_message_schema *message =
+		&c->document->schemas.messages[error->schema_index];
+	const message_source *sources = &c->messages[error->schema_index];
+
+	if (!related && error->property == VMF_PROPERTY_REPEAT &&
+		error->related_scope_id) {
+		for (size_t i = 0; i < message->repeat_count; ++i)
+			if (message->repeats[i].id == error->related_scope_id)
+				return yyjson_obj_get(sources->repeats[i], "repeat");
+	}
+	if (!related && error->property == VMF_PROPERTY_DEPENDENCY) {
+		yyjson_val *reference_source = nullptr;
+
+		/* Core identifies the consuming native row, not a condition term.
+		 * One candidate identifies the exact key. Several candidates keep
+		 * their common source container rather than guessing a culprit.
+		 */
+		for (reference *entry = sources->references; entry;
+			entry = entry->next) {
+			if (entry->index_position != position)
+				continue;
+			reference_source = reference_source ?
+				common_source(c, reference_source, entry->value) :
+				entry->value;
+		}
+		if (reference_source)
+			return reference_source;
+	}
+	if (position < message->index_count) {
+		yyjson_val *value = sources->indexes[position];
+		const char *property = nullptr;
+
+		if (related || error->property == VMF_PROPERTY_KEY)
+			property = "key";
+		else if (error->property == VMF_PROPERTY_ENCODING &&
+			invalid_width(c, &message->indexes[position]))
+			property = "number_of_bits";
+		yyjson_val *member = property ? yyjson_obj_get(value, property) :
+			nullptr;
+
+		return member ? member : value;
+	}
+	return sources->value;
+}
+
 static bool validate(conversion *c)
 {
 	vmf_allocator allocator = {
@@ -915,12 +1427,33 @@ static bool validate(conversion *c)
 	c->schema_index = error.schema_index;
 	c->index_position = error.index_position;
 	c->property = error.property;
+	c->current = native_source(c, &error, error.index_position, false);
+	c->related = error.related_index_position == SIZE_MAX ? nullptr :
+		native_source(c, &error, error.related_index_position, true);
 	fail(c, status, vmf_status_string(status));
 	if (c->error) {
 		c->error->related_index_position = error.related_index_position;
 		c->error->related_scope_id = error.related_scope_id;
 	}
 	return false;
+}
+
+static void release_sources(conversion *c)
+{
+	for (size_t i = 0; i < c->document->schemas.message_count; ++i) {
+		memory_deallocate(&c->document->memory, c->messages[i].indexes);
+		memory_deallocate(&c->document->memory, c->messages[i].repeats);
+		reference *entry = c->messages[i].references;
+
+		while (entry) {
+			reference *next = entry->next;
+
+			memory_deallocate(&c->document->memory, entry);
+			entry = next;
+		}
+	}
+	memory_deallocate(&c->document->memory, c->messages);
+	memory_deallocate(&c->document->memory, c->sources);
 }
 
 } /* namespace */
@@ -997,14 +1530,22 @@ vmf_status vmf_schema_json_load(const char *data, size_t size,
 				error->byte_offset = read_error.pos;
 		}
 	} else {
-		conversion c = {document, &options->limits, error, VMF_OK,
-			SIZE_MAX, SIZE_MAX, VMF_PROPERTY_NONE};
-		bool converted = convert(&c, yyjson_doc_get_root(json));
+		conversion c = {};
 
-		yyjson_doc_free(json);
+		c.document = document;
+		c.limits = &options->limits;
+		c.error = error;
+		c.schema_index = SIZE_MAX;
+		c.index_position = SIZE_MAX;
+		c.current = yyjson_doc_get_root(json);
+		bool converted = source_tree(&c, json) && convert(&c, c.current);
+
 		if (converted)
 			validate(&c);
 		status = c.status;
+		if (status == VMF_OK)
+			release_sources(&c);
+		yyjson_doc_free(json);
 	}
 	if (status != VMF_OK) {
 		vmf_schema_json_destroy(document);

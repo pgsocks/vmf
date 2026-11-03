@@ -587,9 +587,18 @@ static void index_anchors(work *w)
 	for (size_t i = 1; i < w->scope_count; ++i) {
 		scope *s = &w->scopes[i];
 		bool found = false;
+		bool controlled = s->presence != SIZE_MAX ||
+			s->control != SIZE_MAX;
+
+		/* An uncontrolled scope can contain only a nested controller
+		 * and its body. Include that member controller in the common
+		 * address so the nested scope does not appear to enclose it.
+		 * Controlled scopes retain their own controller/data ancestry.
+		 */
 		for (size_t j = s->first; j <= s->last; ++j) {
 			const vmf_index_schema *index = &w->message->indexes[j];
-			if (index->indicator || !has_scope(index, s))
+			if ((controlled && index->indicator) ||
+				!has_scope(index, s))
 				continue;
 			if (!found) {
 				s->anchor = index->index_number;

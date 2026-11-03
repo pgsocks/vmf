@@ -60,11 +60,24 @@ The primitive request/reply interface owns backpressure, while a provider adapte
 composes it for ordinary callback use. Neither interface requires payload-sized
 storage or a second serializer.
 
-The optional JSON loader converts strict `vmf-schema/1` syntax into these same
-native definitions. It owns descriptors and converts notation, while the core
-decides semantics. It cannot supply different defaults or validation rules.
-Input bytes can be released after loading; codecs borrow the document
-descriptors until destruction.
+The optional JSON loader converts strict `vmf-schema/1` authoring syntax into
+these same native definitions. Ordered arrays and nested wrappers supply
+structure; the loader generates deterministic numeric indexes, presence and
+recurrence controllers, membership paths and repeat declarations. Fields have
+required keys, and named dependencies resolve to their generated native
+addresses. Explicit widths and repetition limits remain authored specification
+values. Plain nested arrays are transparent sequences, so incidental authoring
+groups do not create ambiguous redundant runtime scopes.
+
+The loader owns descriptors and source mappings, while the core decides scope,
+dependency and profile semantics. Intrinsic widths and concrete wire types
+remove redundant authoring declarations without changing native defaults or
+validation rules. The parsed source and conversion maps survive through core
+validation so generated definitions can be diagnosed at their authored
+wrappers. Copied primary/related JSON pointers survive failure cleanup. Input
+bytes can be released after loading; codecs borrow the document descriptors
+until destruction. The authoring structure does not become another runtime
+node API or a payload object model.
 
 The chosen interface accepts exact raw integer/scaled codes and chunked text,
 octets and bits. Floating-point physical values would lose sentinel and exact
@@ -161,8 +174,8 @@ Recurrence always includes a final occurrence preceded by a zero flag.
 Schema values constrain application input; they never manufacture missing
 encoder values.
 
-The public model excludes generic trees, choices, prefix/remainder extents,
-alternative repeat grammars and display labels. Private traversal primitives
+The native public model excludes generic trees, choices, prefix/remainder
+extents, alternative repeat grammars and display labels. Private traversal primitives
 may retain these features where useful. Event logs use canonical references
 and resolved functional manifests to reject replay against incompatible
 definitions. CLI replay selects the recorded compatible subset of a supplied

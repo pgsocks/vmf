@@ -30,6 +30,14 @@ Feature: Inspect, record, and replay VMF streams from pipes
     When I exercise CLI record-replay
     Then the CLI outcomes match the requested workflow
 
+  Scenario: Record and replay a nested optional recurring group
+    When I exercise CLI nested-record-replay
+    Then the CLI outcomes match the requested workflow
+
+  Scenario: Diagnose nested schema properties and related declarations
+    When I exercise CLI schema-diagnostics
+    Then the CLI outcomes match the requested workflow
+
   Scenario: Edit a scalar without changing recorded message sizes
     When I exercise CLI edit-scalar
     Then the CLI outcomes match the requested workflow

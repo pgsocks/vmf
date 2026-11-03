@@ -35,8 +35,12 @@ typedef struct vmf_schema_json_options {
  * independent of input/document lifetime; it never needs releasing.
  * byte_offset is a zero-based JSON byte offset for syntax errors, SIZE_MAX
  * when unavailable (never a PDU bit offset). schema_index and index_position
- * are zero-based array positions or SIZE_MAX when unavailable. property and
- * related locations preserve core diagnostics without borrowing storage.
+ * are zero-based message/generated-index positions or SIZE_MAX when
+ * unavailable. property and related locations preserve core diagnostics.
+ * path and related_path are copied RFC 6901 JSON pointers, empty at the
+ * root/when unavailable. Truncation is explicit and preserves valid UTF-8;
+ * embedded NUL property names also mark truncation. Related paths identify
+ * the source of a related generated index when one is available.
  * Diagnostics remain valid after a failed load has released its storage.
  * Success clears all locations, with status OK and message "ok".
  */
@@ -49,6 +53,10 @@ typedef struct vmf_schema_json_error {
 	vmf_schema_property property;
 	size_t related_index_position;
 	uint32_t related_scope_id;
+	char path[512];
+	bool path_truncated;
+	char related_path[512];
+	bool related_path_truncated;
 } vmf_schema_json_error;
 
 /* VMF defaults, 16 MiB input, 64 MiB live allocations, default allocator.

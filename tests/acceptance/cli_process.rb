@@ -113,7 +113,7 @@ def schema(number = 1, profile = 'D1')
 		'format' => 'vmf-schema/1', 'envelope' => profile,
 		'messages' => [{
 			'message_number' => "K01.#{number}",
-			'indexes' => [{'index_number' => '1.', 'number_of_bits' => 8}]
+			'elements' => [{'key' => 'value', 'number_of_bits' => 8}]
 		}]
 	}
 	definition['standard_version'] = 0 unless profile == 'B'
@@ -315,6 +315,60 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 		output, error = success(run(replay + ['-vvvv']))
 		check(output == bytes * 2, 'Verbose replay must preserve bytes.')
 		check(error.include?('WIRE'), '-vvvv replay must show wire bytes.')
+	when 'nested-record-replay'
+		definition = schema
+		definition['messages'][0]['elements'] = [{
+			'optional' => {'recurrence' => {
+				'maximum' => 3,
+				'body' => [{'key' => 'value', 'number_of_bits' => 2}]
+			}}
+		}]
+		File.write(schema_path, JSON.generate(definition))
+		# Presence, more + 3, last + 1, then one zero padding bit.
+		nested = bytes.byteslice(0, bytes.bytesize - 1) + "\x2f".b
+		records = record.call(nested)
+		fields = records.select { |item| item['event'] == 'FIELD' }
+		check(fields.map { |item| item['value']['value'] } == %w[3 1],
+			'Nested recording must decode both group occurrences.')
+		check(fields.all? { |item| item['index_number'] == [1, 1, 1] },
+			'Nested fields must use deterministic generated addresses.')
+		indexes = records.first['schemas'].first['indexes']
+		check(indexes.map { |item| item['index_number'] } ==
+			[[1], [1, 1], [1, 1, 1]],
+			'Manifest must include the generated GPI and GRI entries.')
+		check(indexes[0]['indicator'] == 2 && indexes[1]['indicator'] == 4,
+			'A one-field group must retain GPI and GRI controls.')
+		output, = success(run(replay))
+		check(output == nested, 'Nested replay must be byte identical.')
+	when 'schema-diagnostics'
+		definition = schema
+		definition['messages'][0]['elements'] = [{
+			'optional' => {'key' => 'payload', 'type' => 'bits',
+				'number_of_bits' => 8, 'length_from' => 'missing'}
+		}]
+		File.write(schema_path, JSON.generate(definition))
+		error = failure(run(base))
+		check(error.include?('unknown field reference'),
+			'A schema failure must explain the unresolved reference.')
+		check(error.include?('/messages/0/elements/0/optional/length_from'),
+			'A missing reference must identify the authored property.')
+		definition['messages'][0]['elements'] = [
+			{'key' => 'value', 'number_of_bits' => 2},
+			{'optional' => {'key' => 'value', 'number_of_bits' => 8}}
+		]
+		File.write(schema_path, JSON.generate(definition))
+		error = failure(run(base))
+		check(error.include?('path=/messages/0/elements/1/optional/key'),
+			'A duplicate key must identify its authored property.')
+		check(error.include?('related_path=/messages/0/elements/0/key'),
+			'A duplicate key must identify the previous declaration.')
+		definition['messages'][0]['elements'] = [{
+			'key' => 'value', 'number_of_bits' => 8, 'x' * 600 => 1
+		}]
+		File.write(schema_path, JSON.generate(definition))
+		error = failure(run(base))
+		check(error.include?('(truncated)'),
+			'A shortened schema path must be marked as truncated.')
 	when 'edit-scalar'
 		records = record.call
 		records.find { |item| item['event'] == 'FIELD' }['value']['value'] = '91'
@@ -395,7 +449,7 @@ Dir.mktmpdir('vmf-cli-') do |directory|
 		output, = success(run(replay + ['--schema', other]))
 		check(output == bytes, 'Unrelated replay schemas must be allowed.')
 		changed = schema
-		changed['messages'][0]['indexes'][0]['number_of_bits'] = 7
+		changed['messages'][0]['elements'][0]['number_of_bits'] = 7
 		File.write(schema_path, JSON.generate(changed))
 		failure(run(replay))
 		File.write(schema_path, JSON.generate(schema))

@@ -1,6 +1,7 @@
 #include <gtest/gtest.h>
 #include <cucumber-cpp/autodetect.hpp>
 #include <vmf/schema_json.h>
+#include <cstring>
 #include <string>
 #include <vector>
 
@@ -10,6 +11,8 @@ namespace
 struct json_context {
 	std::string input;
 	std::string example;
+	std::string expected_path;
+	std::string expected_related_path;
 	uint32_t addresses[4][3] = {{1}, {2}, {3}, {4}};
 	vmf_group_id groups[4] = {1, 1, 1, 1};
 	vmf_index_schema indexes[4] = {};
@@ -17,6 +20,9 @@ struct json_context {
 	vmf_repeat_component memberships[4] = {};
 	vmf_repeat_component inner_memberships[2] = {};
 	vmf_repeat_definition repeat = {};
+	vmf_condition condition = {};
+	vmf_condition_term term = {};
+	vmf_code_range allowed = {};
 	vmf_message_schema schema = {};
 	vmf_schema_set native = {};
 	vmf_schema_json_document *document = nullptr;
@@ -77,22 +83,26 @@ static void attach_payload(json_context *c,
 	c->wire.insert(c->wire.end(), body);
 }
 
-static void field(json_context *c, size_t position, uint64_t width)
+static void field(json_context *c, size_t position, uint64_t width,
+	const char *key = nullptr)
 {
 	c->indexes[position].index_number = {c->addresses[position], 1};
 	c->indexes[position].number_of_bits = width;
+	if (key)
+		c->indexes[position].key = {key, std::strlen(key)};
 }
 
 GIVEN("^a JSON definition of a synthetic "
 	"(scalar|recurrence|presence|absence|field-count|UTF-8 text|"
-	"literal text|group recurrence|group absence|nested recurrence) "
+	"literal text|group recurrence|group absence|nested recurrence|"
+	"recurring optional field|single-field group|named dependencies|"
+	"counted optional group) "
 	"payload$")
 {
 	REGEX_PARAM(std::string, example);
 	cucumber::ScenarioScope<json_context> context;
 	auto *c = context.get();
-	std::string indexes;
-	std::string extra;
+	std::string elements;
 
 	c->example = example;
 	c->schema.message_number = {1, 1};
@@ -102,15 +112,15 @@ GIVEN("^a JSON definition of a synthetic "
 	c->native.messages = &c->schema;
 	c->native.message_count = 1;
 	if (example == "scalar") {
-		field(c, 0, 5);
-		field(c, 1, 13);
+		field(c, 0, 5, "first");
+		field(c, 1, 13, "second");
 		c->schema.index_count = 2;
-		indexes = "{\"index_number\":\"1.\",\"number_of_bits\":5},"
-			"{\"index_number\":\"2.\",\"number_of_bits\":13}";
+		elements = "{\"key\":\"first\",\"number_of_bits\":5},"
+			"{\"key\":\"second\",\"number_of_bits\":13}";
 		attach_payload(c, {0x83, 0x46, 0x02});
 	} else if (example == "recurrence") {
 		field(c, 0, 0);
-		field(c, 1, 4);
+		field(c, 1, 4, "value");
 		c->addresses[1][0] = 1;
 		c->addresses[1][1] = 1;
 		c->indexes[1].index_number.count = 2;
@@ -120,21 +130,20 @@ GIVEN("^a JSON definition of a synthetic "
 		c->indexes[0].repeat_code = {&c->memberships[0], 1};
 		c->indexes[1].repeat_code = {&c->memberships[1], 1};
 		c->schema.index_count = 2;
-		indexes = "{\"index_number\":\"1.\",\"indicator\":\"fri\","
-			"\"repeat_code\":\"R1(5)\"},"
-			"{\"index_number\":\"1.1\",\"number_of_bits\":4,"
-			"\"repeat_code\":\"R1\"}";
+		elements = "{\"recurrence\":{\"maximum\":5,\"body\":{"
+			"\"key\":\"value\",\"number_of_bits\":4}}}";
 		attach_payload(c, {0x07, 0x03});
 	} else if (example == "group recurrence" ||
 		example == "group absence") {
 		for (size_t i = 0; i < 4; ++i) {
-			field(c, i, i < 2 ? 0 : i == 2 ? 7 : 9);
-			c->addresses[i][0] = 4;
+			field(c, i, i < 2 ? 0 : i == 2 ? 7 : 9,
+				i < 2 ? nullptr : i == 2 ? "x" : "y");
+			c->addresses[i][0] = 1;
 			if (!i)
 				continue;
 			c->addresses[i][1] = 1;
-			c->addresses[i][2] = (uint32_t)i;
-			c->indexes[i].index_number.count = 3;
+			c->addresses[i][2] = (uint32_t)(i - 1);
+			c->indexes[i].index_number.count = i == 1 ? 2 : 3;
 			c->indexes[i].group_code = {&c->groups[i], 1};
 			c->memberships[i].id = 1;
 			c->indexes[i].repeat_code = {&c->memberships[i], 1};
@@ -145,14 +154,9 @@ GIVEN("^a JSON definition of a synthetic "
 		c->indexes[1].indicator = VMF_INDICATOR_GRI;
 		c->memberships[1].maximum = {true, 4};
 		c->schema.index_count = 4;
-		indexes = "{\"index_number\":\"4.\",\"indicator\":\"gpi\","
-			"\"target\":\"G1\"},"
-			"{\"index_number\":\"4.1.1\",\"indicator\":\"gri\","
-			"\"group_code\":\"G1\",\"repeat_code\":\"R1(4)\"},"
-			"{\"index_number\":\"4.1.2\",\"number_of_bits\":7,"
-			"\"group_code\":\"G1\",\"repeat_code\":\"R1\"},"
-			"{\"index_number\":\"4.1.3\",\"number_of_bits\":9,"
-			"\"group_code\":\"G1\",\"repeat_code\":\"R1\"}";
+		elements = "{\"optional\":{\"recurrence\":{\"maximum\":4,"
+			"\"body\":[{\"key\":\"x\",\"number_of_bits\":7},"
+			"{\"key\":\"y\",\"number_of_bits\":9}]}}}";
 		if (example == "group absence")
 			attach_payload(c, {0});
 		else
@@ -160,7 +164,7 @@ GIVEN("^a JSON definition of a synthetic "
 	} else if (example == "nested recurrence") {
 		field(c, 0, 0);
 		field(c, 1, 0);
-		field(c, 2, 3);
+		field(c, 2, 3, "value");
 		c->addresses[1][0] = c->addresses[2][0] = 1;
 		c->addresses[1][1] = c->addresses[2][1] = 1;
 		c->addresses[2][2] = 1;
@@ -177,16 +181,13 @@ GIVEN("^a JSON definition of a synthetic "
 		c->indexes[1].repeat_code = {c->memberships + 1, 2};
 		c->indexes[2].repeat_code = {c->inner_memberships, 2};
 		c->schema.index_count = 3;
-		indexes = "{\"index_number\":\"1\",\"indicator\":\"gri\","
-			"\"repeat_code\":\"R1(3)\"},"
-			"{\"index_number\":\"1.1\",\"indicator\":\"gri\","
-			"\"repeat_code\":\"R1/R2(2)\"},"
-			"{\"index_number\":\"1.1.1\",\"number_of_bits\":3,"
-			"\"repeat_code\":\"R1/R2\"}";
+		elements = "{\"recurrence\":{\"maximum\":3,\"body\":[{"
+			"\"recurrence\":{\"maximum\":2,\"body\":[{"
+			"\"key\":\"value\",\"number_of_bits\":3}]}}]}}";
 		attach_payload(c, {0x4e, 0x01});
 	} else if (example == "presence" || example == "absence") {
 		field(c, 0, 0);
-		field(c, 1, 9);
+		field(c, 1, 9, "value");
 		c->addresses[1][0] = 1;
 		c->addresses[1][1] = 1;
 		c->indexes[1].index_number.count = 2;
@@ -194,16 +195,17 @@ GIVEN("^a JSON definition of a synthetic "
 		c->indexes[0].target.kind = VMF_TARGET_INDEX;
 		c->indexes[0].target.as.index = c->indexes[1].index_number;
 		c->schema.index_count = 2;
-		indexes = "{\"index_number\":\"1.\",\"indicator\":\"fpi\","
-			"\"target\":\"1.1\"},"
-			"{\"index_number\":\"1.1\",\"number_of_bits\":9}";
+		elements = "{\"optional\":{\"key\":\"value\","
+			"\"number_of_bits\":9}}";
 		if (example == "presence")
 			attach_payload(c, {0xab, 0x02});
 		else
 			attach_payload(c, {0x00});
 	} else if (example == "field-count") {
-		field(c, 0, 2);
-		field(c, 1, 3);
+		field(c, 0, 2, "count");
+		field(c, 1, 3, "value");
+		c->addresses[1][1] = 1;
+		c->indexes[1].index_number.count = 2;
 		c->memberships[1].id = 1;
 		c->indexes[1].repeat_code = {&c->memberships[1], 1};
 		c->repeat.id = 1;
@@ -213,31 +215,115 @@ GIVEN("^a JSON definition of a synthetic "
 		c->schema.repeats = &c->repeat;
 		c->schema.repeat_count = 1;
 		c->schema.index_count = 2;
-		indexes = "{\"index_number\":\"1.\",\"number_of_bits\":2},"
-			"{\"index_number\":\"2.\",\"number_of_bits\":3,"
-			"\"repeat_code\":\"R1\"}";
-		extra = ",\"repeats\":[{\"repeat_code\":\"R1\","
-			"\"count_from\":\"1.\",\"maximum\":3}]";
+		elements = "{\"key\":\"count\",\"number_of_bits\":2},"
+			"{\"repeat\":{\"count_from\":\"count\",\"maximum\":3,"
+			"\"body\":{\"key\":\"value\",\"number_of_bits\":3}}}";
 		attach_payload(c, {0x76});
+	} else if (example == "counted optional group") {
+		field(c, 0, 2, "count");
+		field(c, 1, 0);
+		field(c, 2, 3, "value");
+		c->addresses[1][1] = 1;
+		c->addresses[2][0] = 2;
+		c->addresses[2][1] = c->addresses[2][2] = 1;
+		c->indexes[1].index_number.count = 2;
+		c->indexes[2].index_number.count = 3;
+		c->indexes[1].indicator = VMF_INDICATOR_GPI;
+		c->indexes[1].target.kind = VMF_TARGET_GROUP;
+		c->indexes[1].target.as.group = 1;
+		c->indexes[2].group_code = {&c->groups[2], 1};
+		for (size_t i = 1; i < 3; ++i) {
+			c->memberships[i].id = 1;
+			c->indexes[i].repeat_code = {&c->memberships[i], 1};
+		}
+		c->repeat.id = 1;
+		c->repeat.kind = VMF_REPEAT_FIELD;
+		c->repeat.count_from = c->indexes[0].index_number;
+		c->repeat.maximum = 3;
+		c->schema.repeats = &c->repeat;
+		c->schema.repeat_count = 1;
+		c->schema.index_count = 3;
+		elements = "{\"key\":\"count\",\"number_of_bits\":2},"
+			"{\"repeat\":{\"count_from\":\"count\",\"maximum\":3,"
+			"\"body\":{\"optional\":[{\"key\":\"value\","
+			"\"number_of_bits\":3}]}}}";
+		attach_payload(c, {0x2e});
+	} else if (example == "recurring optional field") {
+		field(c, 0, 0);
+		field(c, 1, 0);
+		field(c, 2, 3, "value");
+		c->addresses[1][0] = c->addresses[2][0] = 1;
+		c->addresses[1][1] = c->addresses[2][1] = 1;
+		c->addresses[2][2] = 1;
+		c->indexes[1].index_number.count = 2;
+		c->indexes[2].index_number.count = 3;
+		c->indexes[0].indicator = VMF_INDICATOR_GRI;
+		c->indexes[1].indicator = VMF_INDICATOR_FPI;
+		c->indexes[1].target.kind = VMF_TARGET_INDEX;
+		c->indexes[1].target.as.index = c->indexes[2].index_number;
+		for (size_t i = 0; i < 3; ++i) {
+			c->memberships[i].id = 1;
+			c->indexes[i].repeat_code = {&c->memberships[i], 1};
+		}
+		c->memberships[0].maximum = {true, 3};
+		c->schema.index_count = 3;
+		elements = "{\"recurrence\":{\"maximum\":3,\"body\":{"
+			"\"optional\":{\"key\":\"value\","
+			"\"number_of_bits\":3}}}}";
+		attach_payload(c, {0x59});
+	} else if (example == "single-field group") {
+		field(c, 0, 0);
+		field(c, 1, 3, "value");
+		c->addresses[1][0] = c->addresses[1][1] = 1;
+		c->indexes[1].index_number.count = 2;
+		c->indexes[0].indicator = VMF_INDICATOR_GRI;
+		c->memberships[0] = {1, {true, 3}};
+		c->memberships[1].id = 1;
+		c->indexes[0].repeat_code = {&c->memberships[0], 1};
+		c->indexes[1].repeat_code = {&c->memberships[1], 1};
+		c->schema.index_count = 2;
+		elements = "{\"recurrence\":{\"maximum\":3,\"body\":[{"
+			"\"key\":\"value\",\"number_of_bits\":3}]}}";
+		attach_payload(c, {0xa7});
+	} else if (example == "named dependencies") {
+		field(c, 0, 2, "length");
+		field(c, 1, 3, "payload");
+		c->indexes[1].encode_type = VMF_ENCODE_BITS;
+		c->indexes[1].refinements = &c->refinements[1];
+		c->refinements[1].length_from = c->indexes[0].index_number;
+		c->allowed = {2, 2};
+		c->term.field = c->indexes[0].index_number;
+		c->term.values = &c->allowed;
+		c->term.value_count = 1;
+		c->condition.terms = &c->term;
+		c->condition.term_count = 1;
+		c->refinements[1].when = &c->condition;
+		c->schema.index_count = 2;
+		elements = "{\"key\":\"length\",\"number_of_bits\":2},"
+			"{\"key\":\"payload\",\"type\":\"bits\","
+			"\"number_of_bits\":3,\"length_from\":\"length\","
+			"\"when\":{\"all\":[{\"field\":\"length\","
+			"\"values\":[{\"first\":2,\"last\":2}]}]}}";
+		attach_payload(c, {0x06});
 	} else if (example == "UTF-8 text") {
-		field(c, 0, 64);
+		field(c, 0, 64, "text");
 		c->indexes[0].encode_type = VMF_ENCODE_TEXT;
 		c->indexes[0].refinements = &c->refinements[0];
 		c->refinements[0].text_encoding = VMF_TEXT_UTF_8;
-		indexes = "{\"index_number\":\"1.\",\"number_of_bits\":64,"
-			"\"encode_type\":\"text\",\"text_encoding\":\"utf_8\"}";
+		elements = "{\"key\":\"text\",\"number_of_bits\":64,"
+			"\"type\":\"text\",\"text_encoding\":\"utf_8\"}";
 		attach_payload(c,
 			{0x41, 0xe2, 0x82, 0xac, 0xf0, 0x90, 0x8d, 0x88});
 	} else {
-		field(c, 0, 14);
+		field(c, 0, 14, "text");
 		c->indexes[0].encode_type = VMF_ENCODE_LITERAL;
-		indexes = "{\"index_number\":\"1.\",\"number_of_bits\":14,"
-			"\"encode_type\":\"literal\"}";
+		elements = "{\"key\":\"text\",\"number_of_bits\":14,"
+			"\"type\":\"literal\"}";
 		attach_payload(c, {0xc1, 0x3f});
 	}
 	c->input = "{\"format\":\"vmf-schema/1\",\"envelope\":\"C\","
-		"\"messages\":[{\"message_number\":\"K01.1\",\"indexes\":[" +
-		indexes + "]" + extra + "}]}";
+		"\"messages\":[{\"message_number\":\"K01.1\",\"elements\":[" +
+		elements + "]}]}";
 }
 
 WHEN("^I load the JSON payload schema and release its source bytes$")
@@ -367,12 +453,20 @@ THEN("^the JSON schema produces the handwritten schema's events and bytes$")
 		EXPECT_TRUE(c->numbers.empty());
 	if (c->example == "field-count")
 		EXPECT_EQ((std::vector<uint64_t>{2, 5, 3}), c->numbers);
+	if (c->example == "counted optional group")
+		EXPECT_EQ((std::vector<uint64_t>{2, 5}), c->numbers);
 	if (c->example == "group recurrence")
 		EXPECT_EQ((std::vector<uint64_t>{3, 257, 5, 2}), c->numbers);
 	if (c->example == "group absence")
 		EXPECT_TRUE(c->numbers.empty());
 	if (c->example == "nested recurrence")
 		EXPECT_EQ((std::vector<uint64_t>{3, 5}), c->numbers);
+	if (c->example == "recurring optional field")
+		EXPECT_EQ((std::vector<uint64_t>{5}), c->numbers);
+	if (c->example == "single-field group")
+		EXPECT_EQ((std::vector<uint64_t>{3, 5}), c->numbers);
+	if (c->example == "named dependencies")
+		EXPECT_EQ((std::vector<uint64_t>{2}), c->numbers);
 }
 
 GIVEN("^a JSON schema set with a valid entry followed by an invalid entry$")
@@ -380,10 +474,35 @@ GIVEN("^a JSON schema set with a valid entry followed by an invalid entry$")
 	cucumber::ScenarioScope<json_context> c;
 
 	c->input = "{\"format\":\"vmf-schema/1\",\"envelope\":\"C\","
-		"\"messages\":[{\"message_number\":\"K01.1\",\"indexes\":[{"
-		"\"index_number\":\"1.\",\"number_of_bits\":8}]},"
-		"{\"message_number\":\"K01.2\",\"indexes\":[{"
-		"\"index_number\":\"2.\",\"number_of_bits\":0}]}]}";
+		"\"messages\":[{\"message_number\":\"K01.1\",\"elements\":[{"
+		"\"key\":\"value\",\"number_of_bits\":8}]},"
+		"{\"message_number\":\"K01.2\",\"elements\":[{"
+		"\"key\":\"value\",\"number_of_bits\":0}]}]}";
+}
+
+GIVEN("^a nested JSON schema containing "
+	"(an unknown length reference|a duplicate field key)$")
+{
+	REGEX_PARAM(std::string, problem);
+	cucumber::ScenarioScope<json_context> c;
+	std::string elements;
+
+	if (problem == "an unknown length reference") {
+		elements = "{\"optional\":{\"key\":\"payload\","
+			"\"type\":\"bits\",\"number_of_bits\":8,"
+			"\"length_from\":\"missing\"}}";
+		c->expected_path =
+			"/messages/0/elements/0/optional/length_from";
+	} else {
+		elements = "{\"key\":\"value\",\"number_of_bits\":2},"
+			"{\"optional\":{\"key\":\"value\","
+			"\"number_of_bits\":8}}";
+		c->expected_path = "/messages/0/elements/1/optional/key";
+		c->expected_related_path = "/messages/0/elements/0/key";
+	}
+	c->input = "{\"format\":\"vmf-schema/1\",\"envelope\":\"C\","
+		"\"messages\":[{\"message_number\":\"K01.1\",\"elements\":[" +
+		elements + "]}]}";
 }
 
 WHEN("^I attempt to load the complete JSON schema set$")
@@ -403,6 +522,24 @@ THEN("^no schema owner is published and the second entry is diagnosed$")
 	EXPECT_EQ(nullptr, c->document);
 	EXPECT_EQ(1u, c->error.schema_index);
 	EXPECT_EQ(0u, c->error.index_position);
+	EXPECT_STREQ("/messages/1/elements/0/number_of_bits",
+		c->error.path);
+}
+
+THEN("^the failing authored property is diagnosed after source release$")
+{
+	cucumber::ScenarioScope<json_context> c;
+
+	c->input.assign(c->input.size(), 'x');
+	c->input.clear();
+	c->input.shrink_to_fit();
+	EXPECT_EQ(VMF_INVALID_SCHEMA, c->status);
+	EXPECT_EQ(nullptr, c->document);
+	EXPECT_STREQ(c->expected_path.c_str(), c->error.path);
+	EXPECT_FALSE(c->error.path_truncated);
+	EXPECT_STREQ(c->expected_related_path.c_str(), c->error.related_path);
+	EXPECT_FALSE(c->error.related_path_truncated);
+	EXPECT_NE(nullptr, c->error.message);
 }
 
 struct portable_context {
@@ -433,8 +570,8 @@ GIVEN("^an envelope-independent JSON registry for "
 	std::string edition = definition == "MIL-STD-6017E" ?
 		definition : "MIL-STD-6017B";
 	std::string message = "{\"message_number\":\"K01.1\","
-		"\"message_standard\":\"" + edition + "\",\"indexes\":[{"
-		"\"index_number\":\"1.\",\"number_of_bits\":8}]}";
+		"\"message_standard\":\"" + edition + "\",\"elements\":[{"
+		"\"key\":\"value\",\"number_of_bits\":8}]}";
 	std::string input = "{\"format\":\"vmf-schema/1\",\"messages\":[" +
 		message;
 
@@ -442,8 +579,8 @@ GIVEN("^an envelope-independent JSON registry for "
 		VMF_STANDARD_6017E : VMF_STANDARD_6017B);
 	if (definition == "two editions of the same message") {
 		input += ",{\"message_number\":\"K01.1\","
-			"\"message_standard\":\"MIL-STD-6017C\",\"indexes\":[{"
-			"\"index_number\":\"1.\",\"number_of_bits\":8}]}";
+			"\"message_standard\":\"MIL-STD-6017C\",\"elements\":[{"
+			"\"key\":\"value\",\"number_of_bits\":8}]}";
 		c->editions.push_back(VMF_STANDARD_6017C);
 	}
 	input += "]}";

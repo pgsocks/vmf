@@ -6,9 +6,12 @@ static CMake target `vmf::vmf`. Logical structs are not packed wire overlays.
 The [format reference](format.md) defines the supported envelopes; no built-in
 MIL-STD-6017 schemas are supplied.
 
-The optional `vmf::schema_json` companion accepts VMF-specific JSON payload
-definitions and owns the resulting native schema set. Its C11 header is
-`<vmf/schema_json.h>`; `<vmf/schema_json.hpp>` supplies procedural C++17
+The optional `vmf::schema_json` companion accepts ordered, nested JSON payload
+definitions and owns the resulting explicit native schema set. JSON fields use
+required application keys; arrays and wrappers generate numeric indexes,
+presence/recurrence controllers, memberships and repeat declarations. Its
+C11 header is `<vmf/schema_json.h>`; `<vmf/schema_json.hpp>` supplies
+procedural C++17
 forwarders in `vmf::schema_json`. See the [JSON schema guide](schema-json.md)
 for the format, limits, diagnostics, ownership, and a load-to-codec example.
 Directly authored C schemas continue to use `vmf::vmf` alone.
@@ -58,7 +61,9 @@ all referenced data are borrowed until handle destruction. Distinct codecs
 share definitions but own their resolved traversal and runtime state. No
 public root node or generated node ID is required. Standalone validation and
 codec construction use the same core resolver; the optional JSON loader
-merely constructs these native definitions.
+constructs these native definitions from its ordered authoring structure.
+Generated fields can be resolved through `vmf_schema_find_key`; their numeric
+addresses and the generated controls remain available for native inspection.
 
 An ordinary index requires its typed number and bit width. Omitted encoding
 means unsigned raw data for widths 1–64. Wider data requires explicit bits,
@@ -604,11 +609,21 @@ to each declaration in the public header. Input/output/event buffers must not
 overlap each other, schema storage or codec storage. No API throws exceptions,
 performs transport I/O or changes a process-global registry.
 
-Public schemas use ordered indexes and explicit controls. Generic node trees,
-choices, prefix/remainder extents, alternative recurrence grammars and display
-labels are outside the public schema model. The JSON loader accepts
-`vmf-schema/1`. CLI recordings store canonical references and exact resolved
-schema manifests.
+Native public schemas use ordered indexes and explicit controls. The
+`vmf-schema/1` JSON authoring format expresses the same supported behavior
+through ordered arrays and nested optional/recurrence/repeat wrappers, then
+loads ordinary native definitions. It accepts no handwritten index, membership
+or target declarations. Generic runtime node trees, choices, prefix/remainder
+extents, alternative recurrence grammars and display labels remain outside the
+native public schema model. CLI recordings store canonical references and exact
+resolved schema manifests, including the generated explicit definitions.
+
+JSON loading diagnostics add copied primary and related RFC 6901 source paths
+to the native locations. Each 512-byte path has an explicit truncation flag,
+and the complete diagnostic survives input/owner cleanup. A generated
+controller error identifies its authored wrapper. See the
+[JSON schema guide](schema-json.md) for the complete format and MIL indicator
+mapping.
 
 ## CLI recordings
 

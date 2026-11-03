@@ -5,7 +5,8 @@ int vmf_schema_json_c_consumer(void)
 {
 	vmf_schema_json_options options = vmf_schema_json_default_options();
 	const char input[] = "{\"format\":\"vmf-schema/1\",\"envelope\":\"C\","
-		"\"messages\":[]}";
+		"\"messages\":[{\"message_number\":\"K01.1\",\"elements\":[{"
+		"\"optional\":{\"key\":\"ready\",\"type\":\"bool\"}}]}]}";
 	vmf_schema_json_document *document = NULL;
 	vmf_schema_json_error error;
 
@@ -14,7 +15,12 @@ int vmf_schema_json_c_consumer(void)
 		return 0;
 	const vmf_schema_set *set = vmf_schema_json_schemas(document);
 	int valid = set != NULL && set->envelope == VMF_ENVELOPE_C &&
-		set->message_count == 0 && error.index_position == SIZE_MAX;
+		set->message_count == 1 && error.index_position == SIZE_MAX &&
+		set->messages[0].index_count == 2 &&
+		set->messages[0].indexes[0].indicator == VMF_INDICATOR_FPI &&
+		set->messages[0].indexes[1].number_of_bits == 1 &&
+		error.path[0] == 0 && !error.path_truncated &&
+		error.related_path[0] == 0 && !error.related_path_truncated;
 
 	vmf_schema_json_destroy(document);
 

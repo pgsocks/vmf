@@ -53,9 +53,12 @@ tested scope and source revision.
 Test dependencies are excluded from installation. The static target is
 `vmf::vmf`. The default build also provides `vmf::schema_json`, which loads
 `vmf-schema/1` JSON definitions into that same native model using pinned
-yyjson 0.12.0. The core resolves profiles, defaults, scopes and controls for
-both native and JSON callers; JSON is optional. Payload definitions support
-VMF (UMF 2), while envelope inspection supports all documented formats.
+yyjson 0.12.0. JSON uses keyed fields, ordered nested arrays and control
+wrappers; the loader derives explicit indexes, controllers and memberships.
+The [JSON schema guide](docs/schema-json.md) explains their mapping to MIL
+fields. The core resolves profiles, defaults, scopes and controls for both
+native and JSON callers; JSON is optional. Payload definitions support VMF
+(UMF 2), while envelope inspection supports all documented formats.
 
 One immutable payload registry can serve compatible B/C/D/D1 envelopes.
 Choose the envelope in codec options; the registry's envelope is an optional

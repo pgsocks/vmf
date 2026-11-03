@@ -783,6 +783,66 @@ TEST(NativeSchemaContracts, IndicatorsMapOnceAndNormalizeStableScopes)
 	EXPECT_EQ(VMF_INVALID_SCHEMA, validate_native(&table));
 }
 
+TEST(NativeSchemaContracts, CountedRepeatsCanContainOptionalGroups)
+{
+	for (bool counted : {false, true}) {
+		SCOPED_TRACE(counted);
+		native_table table;
+
+		initialize_native(&table, 3);
+		const uint32_t control_number[] = {2, 1};
+		const uint32_t field_number[] = {2, 1, 1};
+		const vmf_group_id group = 1;
+		const vmf_repeat_component membership = {1, {false, 0}};
+		vmf_repeat_definition declaration = {};
+
+		declaration.id = 1;
+		if (counted) {
+			declaration.kind = VMF_REPEAT_FIELD;
+			declaration.count_from = table.indexes[0].index_number;
+			declaration.maximum = 2;
+		} else {
+			declaration.count = 2;
+		}
+		table.message.repeats = &declaration;
+		table.message.repeat_count = 1;
+		table.indexes[1].index_number = {control_number, 2};
+		table.indexes[1].number_of_bits = 1;
+		table.indexes[1].indicator = VMF_INDICATOR_GPI;
+		table.indexes[1].target.kind = VMF_TARGET_GROUP;
+		table.indexes[1].target.as.group = group;
+		table.indexes[1].repeat_code = {&membership, 1};
+		table.indexes[2].index_number = {field_number, 3};
+		table.indexes[2].group_code = {&group, 1};
+		table.indexes[2].repeat_code = {&membership, 1};
+		auto limits = vmf_default_limits();
+		vmf_runtime_set normalized = {};
+
+		ASSERT_EQ(VMF_OK, vmf_internal::normalize_schemas(&table.set,
+			table.set.envelope, &limits, nullptr, &normalized,
+			nullptr));
+		const vmf_node *root = normalized.schemas[0]->root;
+
+		ASSERT_EQ(2u, root->as.group.child_count);
+		const vmf_node *repeat = &root->as.group.children[1];
+
+		EXPECT_EQ(VMF_SCOPE_REPEAT, repeat->scope.kind);
+		EXPECT_EQ(counted ? VMF_EXTENT_FIELD : VMF_EXTENT_FIXED,
+			repeat->as.repeat.count.kind);
+		const vmf_node *body = repeat->as.repeat.body;
+
+		ASSERT_EQ(1u, body->as.group.child_count);
+		const vmf_node *optional = body->as.group.children;
+
+		EXPECT_EQ(VMF_SCOPE_GROUP, optional->scope.kind);
+		EXPECT_EQ(VMF_PRESENCE_BIT, optional->presence.kind);
+		ASSERT_EQ(1u, optional->as.group.child_count);
+		EXPECT_EQ(&table.indexes[2],
+			optional->as.group.children[0].source);
+		vmf_internal::destroy_normalized_set(&normalized, nullptr);
+	}
+}
+
 TEST(NativeSchemaContracts, AmbiguousReopenedAndCrossingScopesFail)
 {
 	native_table table;

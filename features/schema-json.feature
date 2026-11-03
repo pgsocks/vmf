@@ -9,22 +9,36 @@ Feature: Native payload schemas loaded from JSON
     Then the JSON schema produces the handwritten schema's events and bytes
 
     Examples:
-      | payload           |
-      | scalar            |
-      | recurrence        |
-      | presence          |
-      | absence           |
-      | field-count       |
-      | group recurrence  |
-      | group absence     |
-      | nested recurrence |
-      | UTF-8 text        |
-      | literal text      |
+      | payload                  |
+      | scalar                   |
+      | recurrence               |
+      | presence                 |
+      | absence                  |
+      | field-count              |
+      | counted optional group   |
+      | group recurrence         |
+      | group absence            |
+      | nested recurrence        |
+      | recurring optional field |
+      | single-field group       |
+      | named dependencies       |
+      | UTF-8 text               |
+      | literal text             |
 
   Scenario: Loading a schema set is atomic
     Given a JSON schema set with a valid entry followed by an invalid entry
     When I attempt to load the complete JSON schema set
     Then no schema owner is published and the second entry is diagnosed
+
+  Scenario Outline: A nested schema failure identifies the authored property
+    Given a nested JSON schema containing <problem>
+    When I attempt to load the complete JSON schema set
+    Then the failing authored property is diagnosed after source release
+
+    Examples:
+      | problem                     |
+      | an unknown length reference |
+      | a duplicate field key       |
 
   Scenario: One payload definition works with every envelope edition
     Given an envelope-independent JSON registry for MIL-STD-6017B
